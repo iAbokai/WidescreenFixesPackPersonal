@@ -123,6 +123,11 @@ export void RwRenderStateSet(RwRenderState nState, void* pParam)
     RwEngineInstance->dOpenDevice.fpRenderStateSet(nState, pParam);
 }
 
+export void RwRenderStateGet(RwRenderState nState, void* pParam)
+{
+    RwEngineInstance->dOpenDevice.fpRenderStateGet(nState, pParam);
+}
+
 class Skeleton
 {
 public:

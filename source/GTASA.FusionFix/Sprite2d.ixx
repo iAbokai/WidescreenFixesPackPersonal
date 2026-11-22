@@ -34,12 +34,8 @@ uint32_t s_lastTickMs = 0;
 uint32_t s_lastExitDrawMs = 0;
 constexpr float BORDER_ANIM_SECS = 0.35f;
 
-// vanilla 4:3 cutscene window geometry (22px top / 14px bottom border insets)
-constexpr float VANILLA_WINDOW_FRACTION = 0.7f + 8.0f / 480.0f;
-// vanilla content window sits this many px above the screen center at 4:3
-constexpr float VANILLA_CENTER_FUDGE_Y = 18.0f;
-// minimum visible top border (fraction of the bottom border height) in letterbox mode
-constexpr float MIN_TOP_BAR_BOTTOM_RATIO = 0.2f;
+// The cutscene window geometry constants and the camera zoom (CalculateCutsceneCameraZoom) live in Draw, where the
+// camera needs them as well.
 
 export bool g_isMouseCursor = false;
 bool g_skipXCorrection = false;
@@ -164,8 +160,24 @@ static CRect ComputeCoverRect(CSprite2d* sprite2d, const CRect* rect)
 }
 
 export SafetyHookInline shDrawRect1 = {};
+
+// CSprite2d::DrawRect ends by switching vertex alpha blending off, whatever it was before. The pillar bars are extra
+// rectangles drawn between the game's own sprite draws, so they must not leak that: the loading screens switch the
+// blending on once and then draw the new splash and the fading previous one with it (CLoadingScreen::RenderSplash).
+// With the blending left off by the bars, the fading splash drew opaque and the artworks cut instead of cross fading.
+class VertexAlphaScope
+{
+    int32_t previous = 0;
+public:
+    VertexAlphaScope() { RwRenderStateGet(rwRENDERSTATEVERTEXALPHAENABLE, &previous); }
+    ~VertexAlphaScope() { RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, reinterpret_cast<void*>(static_cast<intptr_t>(previous))); }
+    VertexAlphaScope(const VertexAlphaScope&) = delete;
+    VertexAlphaScope& operator=(const VertexAlphaScope&) = delete;
+};
+
 static void DrawPillarBars(const CRect& content, float top, float bottom)
 {
+    VertexAlphaScope vertexAlpha;
     g_drawingBars = true;
 
     uint8_t black[4] = { 0, 0, 0, g_alpha };
@@ -182,6 +194,7 @@ export void DrawPillarBars43()
 {
     if (std::abs(fWidescreenHudOffset43) > 0.0f)
     {
+        VertexAlphaScope vertexAlpha;
         g_drawingBars = true;
         CRGBA black(0, 0, 0, 255);
         CRect left(0.0f, 0.0f, -fWidescreenHudOffset43, SCREEN_HEIGHT);
@@ -509,7 +522,7 @@ void __fastcall DrawBordersForWideScreen(CCamera* camera, void* edx)
         s_topBar = 0.0f;
         s_bottomBar = 0.0f;
         s_pillarWidth = 0.0f;
-        s_cameraZoom = 1.0f;
+        s_cameraZoom = CalculateCutsceneCameraZoom(screenAspect);
 
         if (screenAspect > contentAspect)
         {
@@ -517,16 +530,12 @@ void __fastcall DrawBordersForWideScreen(CCamera* camera, void* edx)
             s_hasPillar = true;
             float contentWidth = SCREEN_HEIGHT * contentAspect;
             s_pillarWidth = (SCREEN_WIDTH - contentWidth) * 0.5f;
-            s_cameraZoom = VANILLA_WINDOW_FRACTION * screenAspect / DEFAULT_ASPECT_RATIO;
         }
         else
         {
             // Letterbox
             s_hasLetterbox = true;
             float contentFractionTarget = screenAspect / contentAspect;
-            s_cameraZoom = std::max(1.0f,
-                contentFractionTarget + 1.5f * VANILLA_CENTER_FUDGE_Y * screenAspect / 480.0f
-                    * (1.0f + MIN_TOP_BAR_BOTTOM_RATIO) / (1.0f - MIN_TOP_BAR_BOTTOM_RATIO));
             float contentFraction = contentFractionTarget / s_cameraZoom;
             float windowCenter = 0.5f - 0.75f * VANILLA_CENTER_FUDGE_Y * screenAspect / (480.0f * s_cameraZoom);
             s_topBar = std::max(windowCenter - contentFraction * 0.5f, 0.0f) * SCREEN_HEIGHT;
@@ -558,8 +567,9 @@ void __fastcall DrawBordersForWideScreen(CCamera* camera, void* edx)
 
     s_prevIsFading = isFading;
 
-    // apply the cutscene FOV instantly, no animation
-    g_cutsceneCameraZoom = s_cameraZoom;
+    // The cutscene FOV is applied instantly, no animation: CDraw::SetFOV takes the zoom from the screen's aspect ratio
+    // (CalculateCutsceneCameraZoom) as the camera sets the field of view, not from this drawing, which comes a frame
+    // too late for the first frame of a cutscene.
 
     g_skipXCorrection = false;
 }

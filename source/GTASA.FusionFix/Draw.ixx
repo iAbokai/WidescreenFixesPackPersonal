@@ -29,10 +29,39 @@ int lastScreenHeight = 0;
 export float fWidescreenHudOffset = 0.0f;
 export float fMenuAspectRatio = 0.0f;
 
-// current cutscene camera zoom (tan-space), maintained by the border system
-// (Sprite2d writes it each frame so the FOV conversion can follow the border animation)
+// current cutscene camera zoom (tan-space): CDraw::SetFOV sets it from the screen's aspect ratio every time the
+// camera sets the field of view, so the zoom is always that of the frame being rendered
 export float g_cutsceneCameraZoom = 1.0f;
 export float fWidescreenHudOffset43 = 0.0f;
+
+// vanilla 4:3 cutscene window geometry (22px top / 14px bottom border insets)
+export inline constexpr float VANILLA_WINDOW_FRACTION = 0.7f + 8.0f / 480.0f;
+// vanilla content window sits this many px above the screen center at 4:3
+export inline constexpr float VANILLA_CENTER_FUDGE_Y = 18.0f;
+// minimum visible top border (fraction of the bottom border height) in letterbox mode
+export inline constexpr float MIN_TOP_BAR_BOTTOM_RATIO = 0.2f;
+
+// The zoom that fits a widescreen cutscene's (or scripted camera's) field of view to the screen. It follows from the
+// screen's aspect ratio alone, and the cutscene borders (Sprite2d) are laid out from the same numbers. The camera
+// asks for it as it sets the field of view: the border drawing runs after the scene is rendered, so reading what it
+// left from the previous frame gave the first frame with the borders switched on (a mission's camera shot, say) the
+// wrong zoom, and the picture jumped when the right one arrived a frame later.
+export float CalculateCutsceneCameraZoom(float screenAspect)
+{
+    const float contentAspect = DEFAULT_ASPECT_RATIO / VANILLA_WINDOW_FRACTION;
+
+    if (screenAspect > contentAspect)
+    {
+        // Pillarbox
+        return VANILLA_WINDOW_FRACTION * screenAspect / DEFAULT_ASPECT_RATIO;
+    }
+
+    // Letterbox
+    const float contentFractionTarget = screenAspect / contentAspect;
+    return std::max(1.0f,
+        contentFractionTarget + 1.5f * VANILLA_CENTER_FUDGE_Y * screenAspect / 480.0f
+            * (1.0f + MIN_TOP_BAR_BOTTOM_RATIO) / (1.0f - MIN_TOP_BAR_BOTTOM_RATIO));
+}
 
 static float GetConstraintOffset(const std::optional<float>& constraint, float autoOffset)
 {
@@ -327,6 +356,7 @@ void CDraw::SetFOV(float fov)
     }
     else
     {
+        g_cutsceneCameraZoom = CalculateCutsceneCameraZoom(FindAspectRatio());
         ms_fScaledFOV = ConvertFOVforCutscene(fov);
         // Cutscenes fit the field of view to the screen's width instead of the 4:3 height, so the scene appears
         // larger than in gameplay at the same field of view; sprites follow it to keep their size next to the world

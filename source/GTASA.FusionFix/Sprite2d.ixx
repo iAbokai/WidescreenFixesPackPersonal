@@ -495,19 +495,25 @@ void __fastcall DrawBordersForWideScreen(CCamera* camera, void* edx)
     // by ProcessFade before rendering, so their fade start edge is never seen here)
     bool isFadedScreen = !isFading && fadeAlpha > 50.0f;
 
-    // sudden fades (zero-timeout or starting from a dark screen) remove the borders
-    // immediately; gradual fades animate them out via TickBorderAnim below
-    if ((fadeJustStarted && (fadeAlpha > 50.0f || camera->m_fFadeDuration == 0.0f)) || isFadedScreen)
-    {
-        s_bordersMult = 0.0f;
-    }
-
-    bool shouldBeActive = widescreenOn && !isFading && !isFadedScreen;
+    // The borders stay exactly as they are for the whole fade, in or out, and the screen that stays black after it.
+    // Only once the fade is done do they animate in or out again.
+    const bool holdBorders = isFading || isFadedScreen;
 
     if (g_noBorderAnim)
         s_bordersMult = widescreenOn ? 1.0f : 0.0f;
+    else if (holdBorders)
+    {
+        // keep the animation clock current so the first frame after the fade doesn't jump ahead
+        s_lastTickMs = now;
+
+        // a black screen with no cutscene running has nothing to hold, so the fade
+        // doesn't reveal leftover borders (the cutscene ended behind the fade)
+        const bool startedFromBlack = fadeJustStarted && (fadeAlpha > 50.0f || camera->m_fFadeDuration == 0.0f);
+        if (!widescreenOn && (isFadedScreen || startedFromBlack))
+            s_bordersMult = 0.0f;
+    }
     else
-        TickBorderAnim(now, shouldBeActive);
+        TickBorderAnim(now, widescreenOn);
 
     // compute geometry whenever the cutscene is active, even during fades, so
     // the cutscene zoom is correct from the first frame (no FOV jump later)

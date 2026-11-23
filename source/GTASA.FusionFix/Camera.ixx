@@ -584,11 +584,13 @@ void CCamera::UpdatePlayerVehicleSpeedBlur(CCamera* camera, float minSpeed, floa
         return;
 
     // Aircraft inherit the automobile base class at 0x590; the subtype
-    // at 0x594 distinguishes them from cars, monster trucks and quads.
+    // at 0x594 distinguishes them from cars, monster trucks, quads and
+    // motorbikes (bicycles, boats, trains and aircraft are left out).
     const int vehicleSubType = *(int*)((uintptr_t)playerVehicle + 0x594);
     if (vehicleSubType != VEHICLE_AUTOMOBILE &&
         vehicleSubType != VEHICLE_MTRUCK &&
-        vehicleSubType != VEHICLE_QUAD)
+        vehicleSubType != VEHICLE_QUAD &&
+        vehicleSubType != VEHICLE_BIKE)
         return;
 
     float speed = playerVehicle->m_vecMoveSpeed.Magnitude();

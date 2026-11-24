@@ -15,6 +15,10 @@ public:
     static inline bool bBlurEnabled = false;
     static inline float fBlurStrength = 5.0f;
     static inline bool bDisableSMAAWhenMSAA = true;
+    // The SMAA output pass reads the scene as sRGB and writes sRGB (linear blending). When the device honors only one of
+    // the two, the whole picture changes contrast; with this on, the pass blends in the game's own space instead:
+    // neither the read nor the write is converted
+    static inline bool bSmaaInGammaSpace = false;
     static inline bool bRenderToBackBuffer = false;
 
 private:
@@ -372,6 +376,43 @@ private:
         }
     }
 
+    static void DrawSMAAOutputPass(IDirect3DDevice9* dev)
+    {
+        if (!bSmaaInGammaSpace)
+        {
+            DrawAAPass(dev, hOutputTechnique);
+            return;
+        }
+
+        // The device's values from before the effect, put back after it whatever the effect's own restore did
+        DWORD oldWrite = FALSE;
+        DWORD oldRead[4] = {};
+        dev->GetRenderState(D3DRS_SRGBWRITEENABLE, &oldWrite);
+        for (DWORD stage = 0; stage < 4; ++stage)
+            dev->GetSamplerState(stage, D3DSAMP_SRGBTEXTURE, &oldRead[stage]);
+
+        pEffect->SetTechnique(hOutputTechnique);
+        pEffect->CommitChanges();
+
+        UINT passes = 0;
+        if (SUCCEEDED(pEffect->Begin(&passes, 0)))
+        {
+            if (SUCCEEDED(pEffect->BeginPass(0)))
+            {
+                dev->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+                for (DWORD stage = 0; stage < 4; ++stage)
+                    dev->SetSamplerState(stage, D3DSAMP_SRGBTEXTURE, FALSE);
+                DrawAAQuad(dev);
+                pEffect->EndPass();
+            }
+            pEffect->End();
+        }
+
+        dev->SetRenderState(D3DRS_SRGBWRITEENABLE, oldWrite);
+        for (DWORD stage = 0; stage < 4; ++stage)
+            dev->SetSamplerState(stage, D3DSAMP_SRGBTEXTURE, oldRead[stage]);
+    }
+
     static void SaveVertexState(IDirect3DDevice9* dev,
                                 IDirect3DVertexBuffer9*& oldVB,
                                 IDirect3DVertexDeclaration9*& oldDecl,
@@ -460,7 +501,7 @@ public:
         dev->SetRenderTarget(0, pOutput);
         pEffect->SetTexture(hColorTex2D, pSceneTex);
         pEffect->SetTexture(hBlendTex2D, pBlendTex);
-        DrawAAPass(dev, hOutputTechnique);
+        DrawSMAAOutputPass(dev);
 
         if (pOutput != currentRT)
             dev->SetRenderTarget(0, currentRT);

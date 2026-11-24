@@ -40,9 +40,11 @@
 <tr>
 <td width="58%" valign="middle">
 
-- **In-game menu** - the fix's settings are in the game's own menu, in the main menu and in the pause menu. Console gamma is a row of **Options > Display Setup** (after Brightness), field of view and SMAA rows of its **Advanced** screen (after Widescreen and the game's Anti Aliasing); the game's Restore Defaults there resets them too. Everything else is under **Options > Plugins**: the fix first, then every other plugin with settings (such as Fusion Rain Droplets and III.VC.SA.WindowedMode, which sets the window mode). Each plugin's page has its own Preset row (Vanilla, Recommended, Enhanced; press twice to apply), its settings and Restore defaults, with the selected setting's description at the bottom of the screen. Most settings apply at once, the others at the next start (the page then says so above its rows)
+- **In-game menu** - the fix's settings are in the game's own menu, in the main menu and in the pause menu. Console gamma is a row of **Options > Display Setup** (after Brightness), the menus' frame rate limit (**Frame Limiter Menu**) and field of view rows of its **Advanced** screen (after the game's Frame Limiter and Widescreen), and SMAA is a choice of the game's own **Anti Aliasing** row there; the game's Restore Defaults there resets them too. Everything else is under **Options > Plugins**: the fix first, then every other plugin with settings (such as Fusion Rain Droplets and III.VC.SA.WindowedMode, which sets the window mode). Each plugin's page has its own Preset row (Vanilla, Recommended, Enhanced; press twice to apply), its settings and Restore defaults, with the selected setting's description at the bottom of the screen. Most settings apply at once, the others at the next start (the page then says so above its rows)
 - **Settings** - stored in `GTASA.FusionFix.cfg` next to the `.asi`, which the fix writes on its first start with every setting and a comment above each. Change settings in the game, on fusionfix.io or in FusionFixHub (also while the game runs)
-- **Plugins Menu** - `MAIN.PluginsMenu` in the settings file (on by default, after restart): turn it off to hide the **Plugins** row from the Options screen, in the main menu and the pause menu. Console gamma, field of view and SMAA stay on Display Setup and its Advanced screen; the other settings then change in the settings file or in FusionFixHub
+- **Plugins Menu** - `MAIN.PluginsMenu` in the settings file (on by default, after restart): turn it off to hide the **Plugins** row from the Options screen, in the main menu and the pause menu. Console gamma, field of view, the menus' frame rate limit and Anti Aliasing stay on Display Setup and its Advanced screen; the other settings then change in the settings file or in FusionFixHub
+- **Menu Rows** - `MAIN.ConsoleGammaMenu`, `MAIN.FOVMenu` and `MAIN.CutsceneBordersMenu` in the settings file (all on by default, after restart): turn one off to hide its row (Console Gamma on Display Setup, Field of View and Cutscene Borders on its Advanced screen); that setting then changes in the settings file or in FusionFixHub
+- **Languages** - the US executable lists English and Spanish only: the **Language** screen also gets French, German and Italian when their `.gxt` text files (`FRENCH.GXT`, `GERMAN.GXT`, `ITALIAN.GXT`) are in the game's `TEXT` folder
 - **Field of View** - a multiplier (0.5 to 2.0) of the gameplay cameras' field of view, on top of the widescreen correction; cutscenes keep theirs.
 - **Skip Intro** - starts with the loading screen and the main menu, without the title screens and logo videos (on by default, after restart)
 - **Videos** - the intro videos are never cut off or stretched: **Original Aspect** shows them as the game does, inside its 4:3 picture; **Fill** fits them to the whole screen
@@ -86,7 +88,7 @@
 - **Transparent Menu** - makes the menu background transparent with a blur
 - **Xbox 360 Gamma** - a custom gamma curve that produces a higher-contrast image with deeper colors, similar to GTA IV on the Xbox 360
 - **AA Artifact Fix** - hides the 1px lines at the top and left of the screen caused by MSAA
-- **Anti-Aliasing** - Off or SMAA
+- **Anti-Aliasing** - one row in Advanced Display Options: Off, SMAA, or the game's MSAA at 2x, 4x and 8x (as far as the graphics card supports). SMAA is not drawn on top of MSAA, so choosing it turns MSAA off
 
 </td>
 <td width="42%" valign="middle" align="center">

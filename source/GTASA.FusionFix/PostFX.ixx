@@ -98,6 +98,8 @@ public:
             // All of them can be switched in the game's menu: SMAA is the Anti-Aliasing setting's SMAA choice
             CPostFX::bConsoleGammaEnabled = *pConsoleGamma != 0;
             CPostFX::bSmaaEnabled = *pAntiAliasing == 1;
+            // SMAA made the whole picture more contrasty, as if Console Gamma were on: its sRGB conversions off
+            CPostFX::bSmaaInGammaSpace = true;
 
             // Resolve the buffer initializer from CPostEffects::Update; the
             // initial setup call itself can be redirected by SilentPatch.

@@ -6,7 +6,9 @@ module;
 #include "Shared/RWGTA/FixMenu.hpp"
 #include "Shared/RWGTA/RootPages.hpp"
 #include <cmath>
+#include <filesystem>
 #include <string>
+#include <vector>
 
 export module Options;
 
@@ -36,9 +38,12 @@ namespace MenuText
 
 // The fix's settings in the game's frontend: "Plugins" at the end of the Options screen shows the list of plugins (the
 // fix first, then the other plugins with ASI Settings, see Shared/RWGTA/FixMenu.hpp), and each page its settings with
-// their values like Display Setup. Console gamma is a row of Display Setup (after Brightness), the field of view and
-// SMAA rows of its Advanced screen (after Widescreen and the game's Anti Aliasing); the game's Restore Defaults of
-// those screens resets them too. In the main menu and in the pause menu, which share the frontend.
+// their values like Display Setup. Console gamma is a row of Display Setup (after Brightness), the menus' frame rate
+// limit and the field of view rows of its Advanced screen (after the game's Frame Limiter and Widescreen). SMAA is a
+// choice of the game's own Anti Aliasing row there (Off, SMAA, MSAA 2x, 4x, 8x). The game's Restore Defaults of those
+// screens resets them too. MAIN.ConsoleGammaMenu, MAIN.FOVMenu and MAIN.CutsceneBordersMenu (.cfg) leave those rows
+// out. In the main menu and in the pause menu, which share the frontend. The Language screen also gets the rows of the
+// languages the US executable left out, when their text files are in the TEXT folder.
 //
 // San Andreas' screen table (MenuPages) has no screen the PC game leaves unused, so the Options screen shows the fix's
 // rows while they are open: its rows and title are saved, replaced, and put back when the fix's pages are left (Back,
@@ -88,11 +93,13 @@ namespace
     constexpr int ScreenOptions = 33;
     constexpr int ScreenDisplay = 4;
     constexpr int ScreenAdvanced = 27;
+    constexpr int ScreenLanguage = 28;
     constexpr int16_t LineHeight = 30;      // the game's distance between rows placed one after another
     constexpr uint8_t ActionLabel = 1;      // the line of text above the rows (the first entry only)
     constexpr uint8_t ActionBase = 0xC0;    // the fix's rows: ActionBase + row; far from the game's ids (up to 0x41)
     constexpr uint8_t ActionOpen = 0xD0;
     constexpr uint8_t ActionJoined = 0xE0;  // the fix's rows on the game's screens: ActionJoined + index of Joined
+    constexpr uint8_t ActionAntiAliasing = 0x2C;    // the game's Anti Aliasing row (FED_AAS)
     constexpr uint8_t TypeButton = 11, TypeValue = 12;
     constexpr uint8_t AlignLeft = 1, AlignCenter = 3;
 
@@ -102,6 +109,8 @@ namespace
     constexpr size_t MainMenu = 0xE9;
     constexpr size_t CurrentPage = 0x15D;
     constexpr size_t HelperMessage = 0x1B18;    // the game's own notice in the helper text (0: none)
+    constexpr size_t AntiAliasingActive = 0xC8; // the MSAA level in use (1: off) and the one chosen in the menu
+    constexpr size_t AntiAliasingPref = 0xCC;
 
     CMenuScreen* aScreens = nullptr;
     uint8_t* Manager = nullptr;
@@ -126,28 +135,46 @@ namespace
     GameRef<float> RightJustifyWrap;        // CFont's left edge of right-aligned text
     float(__fastcall* StretchX)(uint8_t*, void*, float) = nullptr;
 
-    // The fix's settings on the game's own screens, each after the game's row of that key
+    // The fix's settings on the game's own screens, each after the game's row of that key. A row with a .cfg setting
+    // ("shown", on by default, applies at the next start) is left out when that is off: the setting then stays in the
+    // .cfg and FusionFixHub only. Anti Aliasing is not here: it is the game's row, which also chooses SMAA (see
+    // ChangeAntiAliasing)
     struct JoinedSetting
     {
         const char* id;
         int screen;
         const char* after;
+        const char* shown;
     };
     constexpr JoinedSetting Joined[] =
     {
-        { "GRAPHICS.ConsoleGamma", ScreenDisplay, "FED_BRI" },
-        { "MAIN.FOVFactor", ScreenAdvanced, "FED_WIS" },
-        { "GRAPHICS.AntiAliasing", ScreenAdvanced, "FED_AAS" },
+        { "GRAPHICS.ConsoleGamma", ScreenDisplay, "FED_BRI", "MAIN.ConsoleGammaMenu" },
+        { "MAIN.FPSLimitMenus", ScreenAdvanced, "FEM_FRM", nullptr },
+        { "MAIN.FOVFactor", ScreenAdvanced, "FED_WIS", "MAIN.FOVMenu" },
     };
     bool bJoined = false;                   // the rows are on the game's screens
+    bool JoinedWanted[std::size(Joined)]{}; // the .cfg shows each of them
 
+    // The settings on the game's screens: their rows are the ones on the screen, the others are the .cfg's alone
     std::set<std::string> JoinedIds(int screen = -1)
     {
         std::set<std::string> ids;
-        for (auto& joined : Joined)
+        for (size_t i = 0; i < std::size(Joined); ++i)
         {
-            if (bJoined && (screen < 0 || joined.screen == screen))
-                ids.insert(joined.id);
+            if (bJoined && JoinedWanted[i] && (screen < 0 || Joined[i].screen == screen))
+                ids.insert(Joined[i].id);
+        }
+        return ids;
+    }
+
+    // Not on the fix's pages either: the rows on the game's screens, and the ones the .cfg turned off
+    std::set<std::string> JoinedHidden()
+    {
+        std::set<std::string> ids;
+        for (size_t i = 0; i < std::size(Joined); ++i)
+        {
+            if (bJoined || !JoinedWanted[i])
+                ids.insert(Joined[i].id);
         }
         return ids;
     }
@@ -260,15 +287,15 @@ namespace
             SetText("WFPT1", Model.Pages()[CurrentShownPage].title);
     }
 
-    // Settings that are the game's own rows (Display Setup's Widescreen and Frame Limiter, Menu.ixx): not on the
-    // fix's pages
-    constexpr const char* NativeRows[] = { "MAIN.CutsceneBorders", "MAIN.FPSLimit" };
+    // Settings that are the game's own rows (Advanced's Widescreen, Frame Limiter and Anti Aliasing, Menu.ixx): not on
+    // the fix's pages
+    constexpr const char* NativeRows[] = { "MAIN.CutsceneBorders", "MAIN.FPSLimit", "GRAPHICS.AntiAliasing" };
 
     void OpenModel()
     {
         HMODULE self = nullptr;
         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&OpenModel), &self);
-        auto hidden = JoinedIds();
+        auto hidden = JoinedHidden();
         hidden.insert(std::begin(NativeRows), std::end(NativeRows));
         Model.OpenPlugins(self, LanguageTag(), PageRows, hidden, true);
     }
@@ -416,17 +443,68 @@ namespace
         reinterpret_cast<void(__fastcall*)(uint8_t*, void*, int32_t, int32_t, int32_t, int32_t, int32_t)>(ProcessUserInputPrevious)(manager, edx, down, up, enter, exit, wheel);
     }
 
-    // CMenuManager::ProcessMenuOptions(direction, &exit, enter); true when the row was the fix's
-    bool __cdecl ProcessOptions(uint8_t* manager, int32_t direction, int32_t enter)
+    int(__cdecl* MaxMultiSampling)() = nullptr;     // the game's call for the highest MSAA level of the graphics card
+
+    // The game's Anti Aliasing row is its MSAA level (1: off, else the number of samples; Enter applies it, and the
+    // game's own steps stop at 4), and the fix's SMAA (GRAPHICS.AntiAliasing) is one more choice: Off, SMAA, MSAA 2x,
+    // 4x and 8x, each MSAA level when the graphics card supports it. SMAA is not drawn on top of MSAA, so choosing it
+    // takes the MSAA level off right away (the game's own Enter on the row). Returns 0 for Enter (the game's), 1 when
+    // the row changed, 2 when the game then applies it
+    int ChangeAntiAliasing(uint8_t* manager, int dir)
+    {
+        if (!dir || !MaxMultiSampling)
+            return 0;
+        auto& pref = *reinterpret_cast<int32_t*>(manager + AntiAliasingPref);
+        std::vector<int> levels;
+        for (int level : { 2, 4, 8 })
+        {
+            if (level <= int(MaxMultiSampling()))
+                levels.push_back(level);
+        }
+        const int count = 2 + int(levels.size());
+
+        // Where the row is: 0 Off, 1 SMAA, then the levels; a level that is none of ours (the game's own 3x, from a
+        // saved setting) counts as the last one below it, and the next step leaves it in the direction asked
+        int index = 0;
+        bool exact = true;
+        if (pref <= 1)
+        {
+            index = FixSettings().Int("GRAPHICS.AntiAliasing") == 1 ? 1 : 0;
+        }
+        else
+        {
+            index = 1;
+            for (int i = 0; i < int(levels.size()); ++i)
+            {
+                if (levels[i] <= pref)
+                {
+                    index = 2 + i;
+                    exact = levels[i] == pref;
+                }
+            }
+        }
+        index += dir > 0 ? 1 : (exact ? -1 : 0);
+        index = (index + count) % count;
+
+        pref = index >= 2 ? levels[index - 2] : 1;
+        FixSettings().Set("GRAPHICS.AntiAliasing", std::string(index == 1 ? "1" : "0"));
+        return index == 1 && *reinterpret_cast<int32_t*>(manager + AntiAliasingActive) > 1 ? 2 : 1;
+    }
+
+    // CMenuManager::ProcessMenuOptions(direction, &exit, enter); 0 when the row is not the fix's (or is the game's to
+    // handle), 1 when handled here, 2 when handled and the game then takes Enter on the row
+    int __cdecl ProcessOptions(uint8_t* manager, int32_t direction, int32_t enter)
     {
         Manager = manager;
         if (!bReady)
-            return false;
+            return 0;
         int option = Option(manager);
         if (option < 0 || option >= RowCount)
-            return false;
+            return 0;
         int dir = uint8_t(enter & 0xFF) ? 0 : int(int8_t(direction & 0xFF));
         int screen = Screen(manager);
+        if (State == Mode::None && screen == ScreenAdvanced && aScreens[screen].entries[option].action == ActionAntiAliasing)
+            return ChangeAntiAliasing(manager, dir);
         if (State == Mode::None && JoinedScreen(screen))
         {
             auto joined = JoinedRow(aScreens[screen].entries[option].action - ActionJoined);
@@ -500,8 +578,14 @@ namespace
 
     uint32_t __fastcall OptionsChange(uint8_t* manager, void* edx, uint32_t direction, uint32_t exit, uint32_t enter)
     {
-        if (ProcessOptions(manager, int32_t(direction), int32_t(enter)))
+        switch (ProcessOptions(manager, int32_t(direction), int32_t(enter)))
+        {
+        case 1:
             return 1;
+        case 2:
+            // As if Enter was pressed on the row
+            return reinterpret_cast<OptionsFunction>(OptionsChangePrevious)(manager, edx, 0, exit, 1);
+        }
         return reinterpret_cast<OptionsFunction>(OptionsChangePrevious)(manager, edx, direction, exit, enter);
     }
 
@@ -661,38 +745,60 @@ namespace
         return true;
     }
 
+    int RowsOf(const CMenuScreen& page)
+    {
+        int count = 0;
+        while (count < RowCount && page.entries[count].action)
+            ++count;
+        return count;
+    }
+
+    int EntryNamed(const CMenuScreen& page, const char* name)
+    {
+        int count = RowsOf(page);
+        for (int i = 0; i < count; ++i)
+        {
+            if (strncmp(page.entries[i].name, name, 8) == 0)
+                return i;
+        }
+        return -1;
+    }
+
     // The fix's rows on Display Setup and its Advanced screen, each after its game row, as rows with a value placed
     // one line below the previous; the rows the game places at a fixed height below them move down by as much. Left
-    // alone unless every anchor is there and each screen keeps room for them.
+    // alone unless every anchor is there and each screen keeps room for them. The Cutscene Borders row (the game's
+    // Widescreen, Menu.ixx) is taken out when MAIN.CutsceneBordersMenu is off: the rows below it move up.
     bool AddJoinedEntries()
     {
+        for (size_t i = 0; i < std::size(Joined); ++i)
+        {
+            JoinedWanted[i] = !Joined[i].shown || FixSettings().Bool(Joined[i].shown);
+        }
         for (int screen : { ScreenDisplay, ScreenAdvanced })
         {
             auto& page = aScreens[screen];
             if (strncmp(page.name, "FEH_DIS", 8) != 0)
                 return false;
-            int count = 0;
-            while (count < RowCount && page.entries[count].action)
-                ++count;
-            int added = int(std::count_if(std::begin(Joined), std::end(Joined), [&](auto& j) { return j.screen == screen; }));
-            if (count + added > RowCount)
-                return false;
-            for (auto& joined : Joined)
+            int added = 0;
+            for (size_t i = 0; i < std::size(Joined); ++i)
             {
-                if (joined.screen != screen)
+                if (Joined[i].screen != screen || !JoinedWanted[i])
                     continue;
-                auto it = std::find_if(page.entries, page.entries + count, [&](auto& e) { return strncmp(e.name, joined.after, 8) == 0; });
-                if (it == page.entries + count)
+                if (EntryNamed(page, Joined[i].after) < 0)
                     return false;
+                ++added;
             }
+            if (RowsOf(page) + added > RowCount)
+                return false;
         }
+        bool any = false;
         for (int i = 0; i < int(std::size(Joined)); ++i)
         {
+            if (!JoinedWanted[i])
+                continue;
             auto& page = aScreens[Joined[i].screen];
-            int count = 0;
-            while (count < RowCount && page.entries[count].action)
-                ++count;
-            int at = int(std::find_if(page.entries, page.entries + count, [&](auto& e) { return strncmp(e.name, Joined[i].after, 8) == 0; }) - page.entries) + 1;
+            int count = RowsOf(page);
+            int at = EntryNamed(page, Joined[i].after) + 1;
             for (int k = count; k > at; --k)
             {
                 page.entries[k] = page.entries[k - 1];
@@ -703,8 +809,70 @@ namespace
             sprintf_s(key, "WFPJ%02d", i);
             SetEntry(page.entries[at], ActionJoined + i, key, TypeValue, 0, 0, page.entries[at - 1].align);
             page.entries[at].targetMenu = int8_t(Joined[i].screen);
+            any = true;
         }
-        return true;
+        // After the rows that follow it (the field of view's) were placed
+        if (!FixSettings().Bool("MAIN.CutsceneBordersMenu"))
+        {
+            auto& page = aScreens[ScreenAdvanced];
+            int at = EntryNamed(page, "FED_WIS");
+            if (at >= 0 && page.entries[at].action == 0x1A && !page.entries[at].y)
+            {
+                int count = RowsOf(page);
+                for (int k = at; k + 1 < count; ++k)
+                {
+                    page.entries[k] = page.entries[k + 1];
+                    if (page.entries[k].y)
+                        page.entries[k].y -= LineHeight;
+                }
+                page.entries[count - 1] = {};
+            }
+        }
+        return any;
+    }
+
+    // The language screen of the US executable lists English and Spanish only, though the game switches to the other
+    // three just as well (their handlers and file names are in the executable): their rows are added, for each of
+    // them with its text file in the game's TEXT folder. Left alone when the screen is not as that executable has it
+    void AddLanguageEntries()
+    {
+        auto& page = aScreens[ScreenLanguage];
+        if (strncmp(page.name, "FEH_LAN", 8) != 0 || RowsOf(page) != 3 ||
+            page.entries[0].action != 0x25 || strncmp(page.entries[0].name, "FEL_ENG", 8) != 0 ||
+            page.entries[1].action != 0x29 || strncmp(page.entries[1].name, "FEL_SPA", 8) != 0 ||
+            strncmp(page.entries[2].name, "FEDS_TB", 8) != 0)
+            return;
+        struct Language
+        {
+            uint8_t action;
+            const char* name;
+            const wchar_t* file;
+        };
+        const Language languages[] =
+        {
+            { 0x26, "FEL_FRE", L"FRENCH.GXT" },
+            { 0x27, "FEL_GER", L"GERMAN.GXT" },
+            { 0x28, "FEL_ITA", L"ITALIAN.GXT" },
+        };
+        wchar_t exe[MAX_PATH]{};
+        if (!GetModuleFileNameW(nullptr, exe, MAX_PATH))
+            return;
+        const auto folder = std::filesystem::path(exe).parent_path() / L"TEXT";
+        int at = 1;
+        for (auto& language : languages)
+        {
+            std::error_code error;
+            if (!std::filesystem::is_regular_file(folder / language.file, error))
+                continue;
+            if (RowsOf(page) >= RowCount)
+                break;
+            for (int k = RowsOf(page); k > at; --k)
+                page.entries[k] = page.entries[k - 1];
+            page.entries[at] = page.entries[at + 1];
+            page.entries[at].action = language.action;
+            strncpy_s(page.entries[at].name, language.name, _TRUNCATE);
+            ++at;
+        }
     }
 
     // CMenuManager::SetDefaultPreferences at the game's Restore Defaults (after its question): the fix's rows of that
@@ -714,6 +882,8 @@ namespace
     {
         reinterpret_cast<void(__fastcall*)(uint8_t*, void*, int8_t)>(SetDefaultsPrevious)(manager, edx, screen);
         auto ids = JoinedIds(screen);
+        if (screen == ScreenAdvanced && bReady)
+            ids.insert("GRAPHICS.AntiAliasing");
         if (!ids.empty())
         {
             RWGTAMenu::RestoreDefaults(FixSettings(), ids);
@@ -728,6 +898,20 @@ export namespace FixOptions
     // From Menu.ixx's hook at the end of CMenuManager::DrawStandardMenus' right text switch
     const char* RightText(int action)
     {
+        // The game's Anti Aliasing row: the MSAA level named by its samples, or SMAA when none is chosen (see
+        // ChangeAntiAliasing); Off is the game's own text
+        if (bReady && State == Mode::None && action == ActionAntiAliasing && Manager && MaxMultiSampling)
+        {
+            const int pref = *reinterpret_cast<int32_t*>(Manager + AntiAliasingPref);
+            if (pref > 1)
+            {
+                static char text[16];
+                sprintf_s(text, "MSAA %dx", pref);
+                return text;
+            }
+            if (FixSettings().Int("GRAPHICS.AntiAliasing") == 1)
+                return "SMAA";
+        }
         if (bReady && State == Mode::None && action >= ActionJoined && action < ActionJoined + int(std::size(Joined)))
         {
             char key[8];
@@ -796,6 +980,9 @@ public:
 
             aScreens = reinterpret_cast<CMenuScreen*>(*screens.get_first<uint8_t*>(23) - offsetof(CMenuScreen, entries));
 
+            // French, German and Italian on the language screen, when their text files are there
+            AddLanguageEntries();
+
             // MAIN.PluginsMenu (.cfg, applies at the next start): off leaves the Options screen without its Plugins row;
             // the rows on Display Setup and Advanced stay
             const bool pluginsRow = FixSettings().Bool("MAIN.PluginsMenu");
@@ -809,8 +996,10 @@ public:
                 bJoined = true;
                 SetDefaultsPrevious = injector::MakeCALL(restore.get_first(11), SetDefaults, true).get();
             }
-            if (!pluginsRow && !bJoined)
-                return;
+
+            // The game's Anti Aliasing row also chooses SMAA: its MSAA level limit, from the row's own handler
+            auto multisampling = hook::pattern("41 8B C1 83 F8 04 89 8E CC 00 00 00 7F ? E8 ? ? ? ? 39 86 CC 00 00 00");
+            MaxMultiSampling = reinterpret_cast<decltype(MaxMultiSampling)>(injector::GetBranchDestination(multisampling.get_first(14)).as_int());
 
             RowTextPrevious = injector::MakeCALL(rowText.get_first(1), AnsweredText<RowTextPrevious>, true).get();
             TitleTextPrevious = injector::MakeCALL(titleText.get_first(12), AnsweredText<TitleTextPrevious>, true).get();

@@ -379,7 +379,7 @@
           "value": 240
         }
       ],
-      "label": "@menufps",
+      "label": "@framelimitermenu",
       "description": "@menufps.gameplaylimit.description",
       "page": "display",
       "group": "@group.menus",
@@ -599,7 +599,7 @@
         }
       ],
       "label": "@antialiasing",
-      "description": "@antialiasing.description",
+      "description": "@antialiasing.sa.description",
       "page": "graphics",
       "group": "@group.antialiasing",
       "control": [
@@ -794,6 +794,36 @@
       "default": 1,
       "label": "@pluginsmenu",
       "description": "@pluginsmenu.description",
+      "page": "compatibility",
+      "apply": "restart",
+      "visibility": "file"
+    },
+    {
+      "id": "MAIN.ConsoleGammaMenu",
+      "type": "bool",
+      "default": 1,
+      "label": "@gammamenu",
+      "description": "@gammamenu.description",
+      "page": "compatibility",
+      "apply": "restart",
+      "visibility": "file"
+    },
+    {
+      "id": "MAIN.FOVMenu",
+      "type": "bool",
+      "default": 1,
+      "label": "@fovmenu",
+      "description": "@fovmenu.description",
+      "page": "compatibility",
+      "apply": "restart",
+      "visibility": "file"
+    },
+    {
+      "id": "MAIN.CutsceneBordersMenu",
+      "type": "bool",
+      "default": 1,
+      "label": "@bordersmenu",
+      "description": "@bordersmenu.description",
       "page": "compatibility",
       "apply": "restart",
       "visibility": "file"

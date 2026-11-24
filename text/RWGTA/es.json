@@ -84,6 +84,8 @@
   "hideaabug.all": "Todos los lados",
   "textlanguage": "Idioma del texto",
   "textlanguage.description": "El idioma de las opciones del parche en el menú del juego y de las páginas de los demás plugins. Auto sigue el idioma del juego; elige uno cuando una traducción del juego ha sustituido su idioma.",
+  "pluginsmenu": "Menú Plugins",
+  "pluginsmenu.description": "Muestra Plugins al final de la pantalla Opciones, en el menú principal y en el menú de pausa. Desactívalo para ocultarlo: las filas Gamma de consola, Campo de visión y Anti-aliasing siguen en Display Setup y los demás ajustes se cambian en el archivo .cfg o en FusionFixHub. Se aplica en el próximo inicio.",
   "menu.title": "Plugins",
   "menu.on": "Sí",
   "menu.off": "No",

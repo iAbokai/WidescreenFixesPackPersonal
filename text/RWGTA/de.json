@@ -84,6 +84,8 @@
   "hideaabug.all": "Alle Seiten",
   "textlanguage": "Textsprache",
   "textlanguage.description": "Die Sprache der Optionen des Fixes im Menü des Spiels und der Seiten der anderen Plugins. Auto folgt der Sprache des Spiels; wähle eine, wenn eine Übersetzung des Spiels dessen Sprache ersetzt hat.",
+  "pluginsmenu": "Plugins-Menü",
+  "pluginsmenu.description": "Zeigt Plugins am Ende des Optionen-Bildschirms im Hauptmenü und im Pausenmenü. Deaktivieren blendet es aus: die Zeilen Konsolen-Gamma, Sichtfeld und Anti-Aliasing bleiben unter Display Setup, die übrigen Einstellungen ändern sich in der .cfg-Datei oder in FusionFixHub. Gilt ab dem nächsten Start.",
   "menu.title": "Plugins",
   "menu.on": "An",
   "menu.off": "Aus",

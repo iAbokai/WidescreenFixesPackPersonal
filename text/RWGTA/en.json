@@ -84,6 +84,8 @@
   "hideaabug.all": "All sides",
   "textlanguage": "Text Language",
   "textlanguage.description": "The language of the fix's options in the game's menu, and of the other plugins' pages there. Auto follows the game's language; choose one when a translation of the game replaced its language.",
+  "pluginsmenu": "Plugins Menu",
+  "pluginsmenu.description": "Shows Plugins at the end of the Options screen, in the main menu and the pause menu. Turn it off to hide it: the Console Gamma, Field of View and Anti Aliasing rows stay on Display Setup, and the other settings change in the .cfg file or FusionFixHub. Applies at the next start.",
   "menu.title": "Plugins",
   "menu.on": "On",
   "menu.off": "Off",

@@ -84,6 +84,8 @@
   "hideaabug.all": "Tous les côtés",
   "textlanguage": "Langue du texte",
   "textlanguage.description": "La langue des options du correctif dans le menu du jeu, et des pages des autres plugins. Auto suit la langue du jeu ; choisissez-en une quand une traduction du jeu a remplacé sa langue.",
+  "pluginsmenu": "Menu Plugins",
+  "pluginsmenu.description": "Affiche Plugins à la fin de l'écran Options, dans le menu principal et le menu pause. Désactivez-le pour le masquer : les lignes Gamma console, Champ de vision et Anti-aliasing restent dans Display Setup, et les autres réglages se modifient dans le fichier .cfg ou FusionFixHub. S'applique au prochain démarrage.",
   "menu.title": "Plugins",
   "menu.on": "Avec",
   "menu.off": "Sans",

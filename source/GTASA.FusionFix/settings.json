@@ -787,6 +787,16 @@
       "description": "@textlanguage.description",
       "page": "compatibility",
       "visibility": "editor"
+    },
+    {
+      "id": "MAIN.PluginsMenu",
+      "type": "bool",
+      "default": 1,
+      "label": "@pluginsmenu",
+      "description": "@pluginsmenu.description",
+      "page": "compatibility",
+      "apply": "restart",
+      "visibility": "file"
     }
   ]
 }

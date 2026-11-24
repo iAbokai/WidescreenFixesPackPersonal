@@ -795,7 +795,11 @@ public:
             auto stringWidth = hook::pattern("53 56 8B B4 24 A4 01 00 00 56 C7 44 24");
 
             aScreens = reinterpret_cast<CMenuScreen*>(*screens.get_first<uint8_t*>(23) - offsetof(CMenuScreen, entries));
-            if (!AddOptionsEntry())
+
+            // MAIN.PluginsMenu (.cfg, applies at the next start): off leaves the Options screen without its Plugins row;
+            // the rows on Display Setup and Advanced stay
+            const bool pluginsRow = FixSettings().Bool("MAIN.PluginsMenu");
+            if (pluginsRow && !AddOptionsEntry())
                 return;
 
             // The fix's rows on Display Setup and Advanced, reset by the game's Restore Defaults there
@@ -805,6 +809,8 @@ public:
                 bJoined = true;
                 SetDefaultsPrevious = injector::MakeCALL(restore.get_first(11), SetDefaults, true).get();
             }
+            if (!pluginsRow && !bJoined)
+                return;
 
             RowTextPrevious = injector::MakeCALL(rowText.get_first(1), AnsweredText<RowTextPrevious>, true).get();
             TitleTextPrevious = injector::MakeCALL(titleText.get_first(12), AnsweredText<TitleTextPrevious>, true).get();

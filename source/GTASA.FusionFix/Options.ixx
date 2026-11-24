@@ -6,7 +6,6 @@ module;
 #include "Shared/RWGTA/FixMenu.hpp"
 #include "Shared/RWGTA/RootPages.hpp"
 #include <cmath>
-#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -42,8 +41,7 @@ namespace MenuText
 // limit and the field of view rows of its Advanced screen (after the game's Frame Limiter and Widescreen). SMAA is a
 // choice of the game's own Anti Aliasing row there (Off, SMAA, MSAA 2x, 4x, 8x). The game's Restore Defaults of those
 // screens resets them too. MAIN.ConsoleGammaMenu, MAIN.FOVMenu and MAIN.CutsceneBordersMenu (.cfg) leave those rows
-// out. In the main menu and in the pause menu, which share the frontend. The Language screen also gets the rows of the
-// languages the US executable left out, when their text files are in the TEXT folder.
+// out. In the main menu and in the pause menu, which share the frontend.
 //
 // San Andreas' screen table (MenuPages) has no screen the PC game leaves unused, so the Options screen shows the fix's
 // rows while they are open: its rows and title are saved, replaced, and put back when the fix's pages are left (Back,
@@ -93,7 +91,6 @@ namespace
     constexpr int ScreenOptions = 33;
     constexpr int ScreenDisplay = 4;
     constexpr int ScreenAdvanced = 27;
-    constexpr int ScreenLanguage = 28;
     constexpr int16_t LineHeight = 30;      // the game's distance between rows placed one after another
     constexpr uint8_t ActionLabel = 1;      // the line of text above the rows (the first entry only)
     constexpr uint8_t ActionBase = 0xC0;    // the fix's rows: ActionBase + row; far from the game's ids (up to 0x41)
@@ -114,6 +111,7 @@ namespace
 
     CMenuScreen* aScreens = nullptr;
     uint8_t* Manager = nullptr;
+    int(__cdecl* MaxMultiSampling)() = nullptr;     // RenderWare's highest MSAA level of the graphics card (none: not found)
     bool bReady = false;
 
     enum class Mode { None, Root, Page };
@@ -289,7 +287,7 @@ namespace
 
     // Settings that are the game's own rows (Advanced's Widescreen, Frame Limiter and Anti Aliasing, Menu.ixx): not on
     // the fix's pages
-    constexpr const char* NativeRows[] = { "MAIN.CutsceneBorders", "MAIN.FPSLimit", "GRAPHICS.AntiAliasing" };
+    constexpr const char* NativeRows[] = { "MAIN.CutsceneBorders", "MAIN.FPSLimit" };
 
     void OpenModel()
     {
@@ -297,6 +295,8 @@ namespace
         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&OpenModel), &self);
         auto hidden = JoinedHidden();
         hidden.insert(std::begin(NativeRows), std::end(NativeRows));
+        if (MaxMultiSampling)
+            hidden.insert("GRAPHICS.AntiAliasing");
         Model.OpenPlugins(self, LanguageTag(), PageRows, hidden, true);
     }
 
@@ -442,8 +442,6 @@ namespace
         }
         reinterpret_cast<void(__fastcall*)(uint8_t*, void*, int32_t, int32_t, int32_t, int32_t, int32_t)>(ProcessUserInputPrevious)(manager, edx, down, up, enter, exit, wheel);
     }
-
-    int(__cdecl* MaxMultiSampling)() = nullptr;     // the game's call for the highest MSAA level of the graphics card
 
     // The game's Anti Aliasing row is its MSAA level (1: off, else the number of samples; Enter applies it, and the
     // game's own steps stop at 4), and the fix's SMAA (GRAPHICS.AntiAliasing) is one more choice: Off, SMAA, MSAA 2x,
@@ -831,50 +829,6 @@ namespace
         return any;
     }
 
-    // The language screen of the US executable lists English and Spanish only, though the game switches to the other
-    // three just as well (their handlers and file names are in the executable): their rows are added, for each of
-    // them with its text file in the game's TEXT folder. Left alone when the screen is not as that executable has it
-    void AddLanguageEntries()
-    {
-        auto& page = aScreens[ScreenLanguage];
-        if (strncmp(page.name, "FEH_LAN", 8) != 0 || RowsOf(page) != 3 ||
-            page.entries[0].action != 0x25 || strncmp(page.entries[0].name, "FEL_ENG", 8) != 0 ||
-            page.entries[1].action != 0x29 || strncmp(page.entries[1].name, "FEL_SPA", 8) != 0 ||
-            strncmp(page.entries[2].name, "FEDS_TB", 8) != 0)
-            return;
-        struct Language
-        {
-            uint8_t action;
-            const char* name;
-            const wchar_t* file;
-        };
-        const Language languages[] =
-        {
-            { 0x26, "FEL_FRE", L"FRENCH.GXT" },
-            { 0x27, "FEL_GER", L"GERMAN.GXT" },
-            { 0x28, "FEL_ITA", L"ITALIAN.GXT" },
-        };
-        wchar_t exe[MAX_PATH]{};
-        if (!GetModuleFileNameW(nullptr, exe, MAX_PATH))
-            return;
-        const auto folder = std::filesystem::path(exe).parent_path() / L"TEXT";
-        int at = 1;
-        for (auto& language : languages)
-        {
-            std::error_code error;
-            if (!std::filesystem::is_regular_file(folder / language.file, error))
-                continue;
-            if (RowsOf(page) >= RowCount)
-                break;
-            for (int k = RowsOf(page); k > at; --k)
-                page.entries[k] = page.entries[k - 1];
-            page.entries[at] = page.entries[at + 1];
-            page.entries[at].action = language.action;
-            strncpy_s(page.entries[at].name, language.name, _TRUNCATE);
-            ++at;
-        }
-    }
-
     // CMenuManager::SetDefaultPreferences at the game's Restore Defaults (after its question): the fix's rows of that
     // screen too
     void* SetDefaultsPrevious = nullptr;
@@ -882,7 +836,7 @@ namespace
     {
         reinterpret_cast<void(__fastcall*)(uint8_t*, void*, int8_t)>(SetDefaultsPrevious)(manager, edx, screen);
         auto ids = JoinedIds(screen);
-        if (screen == ScreenAdvanced && bReady)
+        if (screen == ScreenAdvanced && bReady && MaxMultiSampling)
             ids.insert("GRAPHICS.AntiAliasing");
         if (!ids.empty())
         {
@@ -980,9 +934,6 @@ public:
 
             aScreens = reinterpret_cast<CMenuScreen*>(*screens.get_first<uint8_t*>(23) - offsetof(CMenuScreen, entries));
 
-            // French, German and Italian on the language screen, when their text files are there
-            AddLanguageEntries();
-
             // MAIN.PluginsMenu (.cfg, applies at the next start): off leaves the Options screen without its Plugins row;
             // the rows on Display Setup and Advanced stay
             const bool pluginsRow = FixSettings().Bool("MAIN.PluginsMenu");
@@ -997,9 +948,11 @@ public:
                 SetDefaultsPrevious = injector::MakeCALL(restore.get_first(11), SetDefaults, true).get();
             }
 
-            // The game's Anti Aliasing row also chooses SMAA: its MSAA level limit, from the row's own handler
-            auto multisampling = hook::pattern("41 8B C1 83 F8 04 89 8E CC 00 00 00 7F ? E8 ? ? ? ? 39 86 CC 00 00 00");
-            MaxMultiSampling = reinterpret_cast<decltype(MaxMultiSampling)>(injector::GetBranchDestination(multisampling.get_first(14)).as_int());
+            // The game's Anti Aliasing row also chooses SMAA, which needs RenderWare's highest MSAA level of the graphics
+            // card (the function reading it); an executable where it is not found keeps the game's own row
+            auto multisampling = hook::pattern("A1 2C 24 8E 00 C3");
+            if (!multisampling.empty())
+                MaxMultiSampling = reinterpret_cast<decltype(MaxMultiSampling)>(multisampling.get_first());
 
             RowTextPrevious = injector::MakeCALL(rowText.get_first(1), AnsweredText<RowTextPrevious>, true).get();
             TitleTextPrevious = injector::MakeCALL(titleText.get_first(12), AnsweredText<TitleTextPrevious>, true).get();

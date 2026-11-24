@@ -487,30 +487,28 @@ void __fastcall DrawBordersForWideScreen(CCamera* camera, void* edx)
     bool isFading = camera->GetFading();
     float fadeAlpha = camera->m_fFadeAlpha;
 
-    static bool  s_prevIsFading = false;
-
-    bool fadeJustStarted = !s_prevIsFading && isFading;
-
-    // screen faded but m_bFading already cleared (zero-timeout fades get processed
-    // by ProcessFade before rendering, so their fade start edge is never seen here)
+    // screen faded but m_bFading already cleared (the fade finishes a frame before the flag is cleared,
+    // and zero-timeout fades are processed by ProcessFade before rendering)
     bool isFadedScreen = !isFading && fadeAlpha > 50.0f;
 
-    // The borders stay exactly as they are for the whole fade, in or out, and the screen that stays black after it.
-    // Only once the fade is done do they animate in or out again.
-    const bool holdBorders = isFading || isFadedScreen;
+    // CCamera::ProcessFade: flag 1 lowers m_fFadeAlpha towards 0 (the screen fades in from black),
+    // flag 0 raises it towards 255 (the screen fades out to black)
+    const bool isFadingIn = isFading && static_cast<uint16_t>(camera->m_nFadeInOutFlag) == 1;
 
     if (g_noBorderAnim)
         s_bordersMult = widescreenOn ? 1.0f : 0.0f;
-    else if (holdBorders)
+    else if (isFading && !isFadingIn)
     {
-        // keep the animation clock current so the first frame after the fade doesn't jump ahead
+        // Fading out: the borders stay as they are until the screen is black.
+        // Keep the animation clock current so the first frame after the fade doesn't jump ahead.
         s_lastTickMs = now;
-
-        // a black screen with no cutscene running has nothing to hold, so the fade
-        // doesn't reveal leftover borders (the cutscene ended behind the fade)
-        const bool startedFromBlack = fadeJustStarted && (fadeAlpha > 50.0f || camera->m_fFadeDuration == 0.0f);
-        if (!widescreenOn && (isFadedScreen || startedFromBlack))
-            s_bordersMult = 0.0f;
+    }
+    else if (isFadingIn || isFadedScreen)
+    {
+        // Black screen, or fading in from it: the borders already are in the state the screen is about to show
+        // (up for a cutscene that is starting, gone for one that has ended), so the fade reveals them as they are.
+        s_bordersMult = widescreenOn ? 1.0f : 0.0f;
+        s_lastTickMs = now;
     }
     else
         TickBorderAnim(now, widescreenOn);
@@ -570,8 +568,6 @@ void __fastcall DrawBordersForWideScreen(CCamera* camera, void* edx)
         if (renderBorders)
             RenderBorderBars();
     }
-
-    s_prevIsFading = isFading;
 
     // The cutscene FOV is applied instantly, no animation: CDraw::SetFOV takes the zoom from the screen's aspect ratio
     // (CalculateCutsceneCameraZoom) as the camera sets the field of view, not from this drawing, which comes a frame

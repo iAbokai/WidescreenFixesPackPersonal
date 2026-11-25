@@ -579,7 +579,7 @@ static SafetyHookInline DrawMenuHook;
 
 static void __fastcall DrawMenuWithIndicators(uint8_t* manager, void*)
 {
-    FixOptions::BeginMenuDraw();
+    FixOptions::BeginMenuDraw(manager);
     DrawMenuHook.unsafe_thiscall<void>(manager);
     FixOptions::DrawScrollIndicators();
 }

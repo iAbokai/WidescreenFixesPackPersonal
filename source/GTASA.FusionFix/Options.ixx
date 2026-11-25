@@ -456,7 +456,8 @@ namespace
         auto& pref = *reinterpret_cast<int32_t*>(manager + AntiAliasingPref);
         if (!dir)
         {
-            FixSettings().Set("GRAPHICS.AntiAliasing", std::string(PendingSmaa && pref <= 1 ? "1" : "0"));
+            PendingSmaa = PendingSmaa && pref <= 1;
+            FixSettings().Set("GRAPHICS.AntiAliasing", std::string(PendingSmaa ? "1" : "0"));
             return false;
         }
 
@@ -896,9 +897,21 @@ export namespace FixOptions
         return text;
     }
 
-    void BeginMenuDraw()
+    void BeginMenuDraw(uint8_t* manager)
     {
         ValueAreas.bounds.clear();
+
+        // The game drops an MSAA level that was chosen on the Anti Aliasing row but not applied once the cursor leaves
+        // the row (or the screen), and the row shows the level in use again. Off and SMAA are the same choice made by
+        // this fix: they are dropped at the same moment, back to what the setting says
+        if (bReady && MaxMultiSampling && State == Mode::None && manager)
+        {
+            const int option = Option(manager);
+            const bool onRow = Screen(manager) == ScreenAdvanced && option >= 0 && option < RowCount &&
+                aScreens[ScreenAdvanced].entries[option].action == ActionAntiAliasing;
+            if (!onRow)
+                PendingSmaa = FixSettings().Int("GRAPHICS.AntiAliasing") == 1;
+        }
     }
 
     void DrawScrollIndicators()

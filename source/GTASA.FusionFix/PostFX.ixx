@@ -64,6 +64,11 @@ static IDirect3DDevice9* GetDevice9()
 {
     if (!pD3D9Device.is_initialized() || !*pD3D9Device) return nullptr;
     auto device = *pD3D9Device;
+    // While the device is lost or waiting for the game's Reset (an MSAA level or a video mode being applied), nothing of
+    // ours may be created: the effect and the textures are Direct3D objects that make that Reset fail while they live,
+    // and the game then keeps trying it for good (a frozen picture, the menu still answering the keys)
+    if (device->TestCooperativeLevel() != D3D_OK)
+        return nullptr;
     RefreshPostFXSize(device);
     return device;
 }

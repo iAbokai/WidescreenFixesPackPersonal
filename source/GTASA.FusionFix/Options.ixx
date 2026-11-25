@@ -112,6 +112,7 @@ namespace
     CMenuScreen* aScreens = nullptr;
     uint8_t* Manager = nullptr;
     int(__cdecl* MaxMultiSampling)() = nullptr;     // RenderWare's highest MSAA level of the graphics card (none: not found)
+    bool PendingSmaa = false;                       // SMAA chosen on the Anti Aliasing row; applied with Enter, like MSAA
     bool bReady = false;
 
     enum class Mode { None, Root, Page };
@@ -443,16 +444,22 @@ namespace
         reinterpret_cast<void(__fastcall*)(uint8_t*, void*, int32_t, int32_t, int32_t, int32_t, int32_t)>(ProcessUserInputPrevious)(manager, edx, down, up, enter, exit, wheel);
     }
 
-    // The game's Anti Aliasing row is its MSAA level (1: off, else the number of samples; Enter applies it, and the
-    // game's own steps stop at 4), and the fix's SMAA (GRAPHICS.AntiAliasing) is one more choice: Off, SMAA, MSAA 2x,
-    // 4x and 8x, each MSAA level when the graphics card supports it. SMAA is not drawn on top of MSAA, so choosing it
-    // takes the MSAA level off right away (the game's own Enter on the row). Returns 0 for Enter (the game's), 1 when
-    // the row changed, 2 when the game then applies it
-    int ChangeAntiAliasing(uint8_t* manager, int dir)
+    // The game's Anti Aliasing row is its MSAA level (1: off, else the number of samples), chosen with left and right
+    // and applied with Enter (the game's steps stop at 4), and SMAA (GRAPHICS.AntiAliasing) is one more choice that
+    // works the same way: Off, SMAA, MSAA 2x, 4x and 8x, each MSAA level when the graphics card supports it. SMAA is not
+    // drawn on top of MSAA, so choosing it also chooses no MSAA level. Returns false for Enter (the game applies its
+    // MSAA level after this has applied SMAA) and true when the row was changed
+    bool ChangeAntiAliasing(uint8_t* manager, int dir)
     {
-        if (!dir || !MaxMultiSampling)
-            return 0;
+        if (!MaxMultiSampling)
+            return false;
         auto& pref = *reinterpret_cast<int32_t*>(manager + AntiAliasingPref);
+        if (!dir)
+        {
+            FixSettings().Set("GRAPHICS.AntiAliasing", std::string(PendingSmaa && pref <= 1 ? "1" : "0"));
+            return false;
+        }
+
         std::vector<int> levels;
         for (int level : { 2, 4, 8 })
         {
@@ -467,7 +474,7 @@ namespace
         bool exact = true;
         if (pref <= 1)
         {
-            index = FixSettings().Int("GRAPHICS.AntiAliasing") == 1 ? 1 : 0;
+            index = PendingSmaa ? 1 : 0;
         }
         else
         {
@@ -485,13 +492,12 @@ namespace
         index = (index + count) % count;
 
         pref = index >= 2 ? levels[index - 2] : 1;
-        FixSettings().Set("GRAPHICS.AntiAliasing", std::string(index == 1 ? "1" : "0"));
-        return index == 1 && *reinterpret_cast<int32_t*>(manager + AntiAliasingActive) > 1 ? 2 : 1;
+        PendingSmaa = index == 1;
+        return true;
     }
 
-    // CMenuManager::ProcessMenuOptions(direction, &exit, enter); 0 when the row is not the fix's (or is the game's to
-    // handle), 1 when handled here, 2 when handled and the game then takes Enter on the row
-    int __cdecl ProcessOptions(uint8_t* manager, int32_t direction, int32_t enter)
+    // CMenuManager::ProcessMenuOptions(direction, &exit, enter); true when the row was the fix's
+    bool __cdecl ProcessOptions(uint8_t* manager, int32_t direction, int32_t enter)
     {
         Manager = manager;
         if (!bReady)
@@ -576,14 +582,8 @@ namespace
 
     uint32_t __fastcall OptionsChange(uint8_t* manager, void* edx, uint32_t direction, uint32_t exit, uint32_t enter)
     {
-        switch (ProcessOptions(manager, int32_t(direction), int32_t(enter)))
-        {
-        case 1:
+        if (ProcessOptions(manager, int32_t(direction), int32_t(enter)))
             return 1;
-        case 2:
-            // As if Enter was pressed on the row
-            return reinterpret_cast<OptionsFunction>(OptionsChangePrevious)(manager, edx, 0, exit, 1);
-        }
         return reinterpret_cast<OptionsFunction>(OptionsChangePrevious)(manager, edx, direction, exit, enter);
     }
 
@@ -863,7 +863,7 @@ export namespace FixOptions
                 sprintf_s(text, "MSAA %dx", pref);
                 return text;
             }
-            if (FixSettings().Int("GRAPHICS.AntiAliasing") == 1)
+            if (PendingSmaa)
                 return "SMAA";
         }
         if (bReady && State == Mode::None && action >= ActionJoined && action < ActionJoined + int(std::size(Joined)))
@@ -953,6 +953,10 @@ public:
             auto multisampling = hook::pattern("A1 2C 24 8E 00 C3");
             if (!multisampling.empty())
                 MaxMultiSampling = reinterpret_cast<decltype(MaxMultiSampling)>(multisampling.get_first());
+            // The choice shown follows the setting until the row is changed in the menu (and again when the setting is
+            // changed by a preset or an editor)
+            PendingSmaa = FixSettings().Int("GRAPHICS.AntiAliasing") == 1;
+            OnSettingChange("GRAPHICS.AntiAliasing", []() { PendingSmaa = FixSettings().Int("GRAPHICS.AntiAliasing") == 1; });
 
             RowTextPrevious = injector::MakeCALL(rowText.get_first(1), AnsweredText<RowTextPrevious>, true).get();
             TitleTextPrevious = injector::MakeCALL(titleText.get_first(12), AnsweredText<TitleTextPrevious>, true).get();

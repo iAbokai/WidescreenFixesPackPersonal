@@ -5,7 +5,11 @@ module;
 #include "FixSettings.hpp"
 #include "Shared/RWGTA/FixMenu.hpp"
 #include "Shared/RWGTA/RootPages.hpp"
+#include <d3d9.h>
 #include <cmath>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -1078,6 +1082,197 @@ export namespace FixOptions
     }
 }
 
+// Diagnostic log for the freeze after applying an MSAA level on Anti Aliasing (FusionFix_MSAA.log in the game's folder):
+// the game applies the level with a Reset of the Direct3D device (RwD3D9ChangeMultiSamplingLevels) and, when that fails,
+// with a second Reset of the old settings, after which a device that stays lost shows a frozen picture. The log has the
+// parameters and the result of every Reset, the state of the device and the window around the change, and the device's
+// state every half second for ten seconds after it. Nothing is written unless a level is applied or the device is reset.
+namespace MsaaLog
+{
+    FILE* Out = nullptr;
+    uint32_t* GameLevel = nullptr;      // the MSAA level in use
+    uint32_t* GameMaxLevel = nullptr;   // the highest level the device offers
+    uint32_t* GameFlags = nullptr;      // bit 0: exclusive (full screen)
+    SafetyHookInline ChangeHook, VideoModeHook, ResetHook;
+    DWORD WatchUntil = 0, NextWatch = 0;
+
+    void Write(const char* format, ...)
+    {
+        if (!Out)
+        {
+            char path[MAX_PATH]{};
+            GetModuleFileNameA(nullptr, path, MAX_PATH);
+            if (auto slash = strrchr(path, '\\'))
+                slash[1] = 0;
+            strcat_s(path, "FusionFix_MSAA.log");
+            fopen_s(&Out, path, "a");
+            if (Out && ftell(Out) > 512 * 1024)
+            {
+                fclose(Out);
+                fopen_s(&Out, path, "w");
+            }
+            if (!Out)
+                return;
+            fprintf(Out, "---- session (FusionFix MSAA log) ----\n");
+        }
+        char text[1536];
+        va_list args;
+        va_start(args, format);
+        vsnprintf(text, sizeof(text), format, args);
+        va_end(args);
+        fprintf(Out, "[%10lu] %s\n", GetTickCount(), text);
+        fflush(Out);
+    }
+
+    const char* Hr(HRESULT hr)
+    {
+        switch (hr)
+        {
+        case D3D_OK: return "OK";
+        case D3DERR_DEVICELOST: return "DEVICELOST";
+        case D3DERR_DEVICENOTRESET: return "DEVICENOTRESET";
+        case D3DERR_INVALIDCALL: return "INVALIDCALL";
+        case D3DERR_OUTOFVIDEOMEMORY: return "OUTOFVIDEOMEMORY";
+        case D3DERR_DRIVERINTERNALERROR: return "DRIVERINTERNALERROR";
+        case E_OUTOFMEMORY: return "E_OUTOFMEMORY";
+        default: return "?";
+        }
+    }
+
+    IDirect3DDevice9* Device()
+    {
+        try
+        {
+            return pD3D9Device.is_initialized() ? pD3D9Device.get() : nullptr;
+        }
+        catch (...)
+        {
+            return nullptr;
+        }
+    }
+
+    void WriteParams(const char* what, const D3DPRESENT_PARAMETERS& pp)
+    {
+        Write("%s: windowed=%d %ux%u fmt=%d backbuffers=%u msaa=%d quality=%lu swap=%d flags=0x%lX depth=%d/%d refresh=%u interval=0x%X window=%p",
+            what, pp.Windowed, pp.BackBufferWidth, pp.BackBufferHeight, int(pp.BackBufferFormat), pp.BackBufferCount,
+            int(pp.MultiSampleType), pp.MultiSampleQuality, int(pp.SwapEffect), pp.Flags, pp.EnableAutoDepthStencil,
+            int(pp.AutoDepthStencilFormat), pp.FullScreen_RefreshRateInHz, pp.PresentationInterval, pp.hDeviceWindow);
+    }
+
+    void Dump(const char* when)
+    {
+        auto device = Device();
+        if (!device)
+        {
+            Write("%s: no device", when);
+            return;
+        }
+        const HRESULT coop = device->TestCooperativeLevel();
+        Write("%s: cooperative level %s (0x%08lX) | game: msaa=%lu max=%lu flags=0x%lX", when, Hr(coop), static_cast<unsigned long>(coop),
+            GameLevel ? *GameLevel : 0ul, GameMaxLevel ? *GameMaxLevel : 0ul, GameFlags ? *GameFlags : 0ul);
+        IDirect3DSwapChain9* chain = nullptr;
+        D3DPRESENT_PARAMETERS pp{};
+        if (SUCCEEDED(device->GetSwapChain(0, &chain)) && chain)
+        {
+            if (SUCCEEDED(chain->GetPresentParameters(&pp)))
+                WriteParams("  swap chain", pp);
+            chain->Release();
+        }
+        D3DDEVICE_CREATION_PARAMETERS creation{};
+        if (SUCCEEDED(device->GetCreationParameters(&creation)) && creation.hFocusWindow)
+        {
+            RECT rect{};
+            GetWindowRect(creation.hFocusWindow, &rect);
+            Write("  window %p: style=0x%08lX exstyle=0x%08lX rect=%ld,%ld,%ld,%ld iconic=%d foreground=%d", creation.hFocusWindow,
+                static_cast<unsigned long>(GetWindowLongW(creation.hFocusWindow, GWL_STYLE)),
+                static_cast<unsigned long>(GetWindowLongW(creation.hFocusWindow, GWL_EXSTYLE)),
+                rect.left, rect.top, rect.right, rect.bottom, IsIconic(creation.hFocusWindow),
+                GetForegroundWindow() == creation.hFocusWindow);
+        }
+    }
+
+    HRESULT __stdcall ResetDetour(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp)
+    {
+        if (pp)
+            WriteParams("Reset with", *pp);
+        const HRESULT hr = ResetHook.unsafe_stdcall<HRESULT>(device, pp);
+        Write("Reset -> %s (0x%08lX)", Hr(hr), static_cast<unsigned long>(hr));
+        return hr;
+    }
+
+    void HookReset()
+    {
+        auto device = Device();
+        if (ResetHook || !device)
+            return;
+        auto table = *reinterpret_cast<void***>(device);
+        ResetHook = safetyhook::create_inline(table[16], ResetDetour);
+        Write("hooked IDirect3DDevice9::Reset at %p", table[16]);
+    }
+
+    int __cdecl ChangeDetour(int level)
+    {
+        Write("==== ChangeMultiSamplingLevels(%d)", level);
+        HookReset();
+        Dump("before");
+        const int result = ChangeHook.unsafe_ccall<int>(level);
+        Write("ChangeMultiSamplingLevels returned %d%s", result, result ? "" : " (failed: the device may be left lost)");
+        Dump("after");
+        NextWatch = GetTickCount();
+        WatchUntil = NextWatch + 10000;
+        return result;
+    }
+
+    int __cdecl VideoModeDetour(int mode)
+    {
+        Write("RsSetVideoMode(%d)", mode);
+        const int result = VideoModeHook.unsafe_ccall<int>(mode);
+        Write("RsSetVideoMode returned %d", result);
+        Dump("after video mode");
+        return result;
+    }
+
+    void Watch()
+    {
+        if (!WatchUntil)
+            return;
+        const DWORD now = GetTickCount();
+        if (int(now - WatchUntil) > 0)
+        {
+            WatchUntil = 0;
+            Write("watch ended");
+            return;
+        }
+        if (int(now - NextWatch) < 0)
+            return;
+        NextWatch = now + 500;
+        Dump("watch");
+    }
+
+    void Install()
+    {
+        auto change = hook::pattern("A1 ? ? ? ? 83 EC 38 85 C0 53 55 56 57 0F 84");
+        if (!change.empty())
+        {
+            auto function = change.get_first<uint8_t>();
+            auto global = [&](int offset, uint8_t second) -> uint32_t*
+            {
+                return function[offset] == 0x8B && function[offset + 1] == second ? *reinterpret_cast<uint32_t**>(function + offset + 2) : nullptr;
+            };
+            GameLevel = global(0x14, 0x15);
+            GameMaxLevel = global(0x3C, 0x0D);
+            GameFlags = global(0x64, 0x35);
+            ChangeHook = safetyhook::create_inline(function, ChangeDetour);
+        }
+        auto videoMode = hook::pattern("8B 44 24 04 50 E8 ? ? ? ? 83 C4 04 E8 ? ? ? ? A1 ? ? ? ? 8B 48 60");
+        if (!videoMode.empty())
+            VideoModeHook = safetyhook::create_inline(videoMode.get_first<uint8_t>(), VideoModeDetour);
+        WFP::onBeforeReset() += []() { Write("the fix releases its Direct3D resources for the Reset"); };
+        WFP::onGameProcessEvent() += Watch;
+        HookReset();
+    }
+}
+
 class OptionsInit
 {
 public:
@@ -1187,6 +1382,7 @@ public:
                     Wheel.oldButtons = *match.get<uint8_t*>(10);
             }
 
+            MsaaLog::Install();
             bReady = true;
         };
     }

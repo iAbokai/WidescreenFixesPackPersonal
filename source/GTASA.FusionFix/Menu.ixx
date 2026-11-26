@@ -276,6 +276,13 @@ static int FrameLimit()
     return std::max(0, fps);
 }
 
+// The menus' frame rate limit (MAIN.FPSLimitMenus, 0: none, -1: On, the gameplay limit)
+static int MenuFrameLimit()
+{
+    static auto& fps = FixSettings().Int("MAIN.FPSLimitMenus");
+    return fps < 0 ? FrameLimit() : fps;
+}
+
 namespace CText
 {
     void* TheText = nullptr;
@@ -356,6 +363,25 @@ namespace NativeRows
             SyncedLimiter = FrontendMenuManager->m_bPrefsFrameLimiter;
             FixSettings().Set("MAIN.FPSLimit", std::to_string(FrameLimitOfStep(SyncedLimiter)));
         }
+    }
+}
+
+// "On" for the menus' limit (MAIN.FPSLimitMenus -1) is the gameplay limit, which only exists while the Frame Limiter is
+// on: it becomes Off when the Frame Limiter is turned off, and an Off of the menus' limit becomes On again when the
+// Frame Limiter is turned on again (the Frame Limiter Menu row of Options.ixx also leaves out On while there is no limit)
+namespace MenuLimit
+{
+    bool GameLimited = true;
+
+    void Update()
+    {
+        static auto& menus = FixSettings().Int("MAIN.FPSLimitMenus");
+        const bool limited = FrameLimit() > 0;
+        if (limited && !GameLimited && menus == 0)
+            FixSettings().Set("MAIN.FPSLimitMenus", std::string("-1"));
+        else if (!limited && menus < 0)
+            FixSettings().Set("MAIN.FPSLimitMenus", std::string("0"));
+        GameLimited = limited;
     }
 }
 
@@ -521,24 +547,28 @@ static float GetFrameLimiterValue()
     return float(FrameLimit());
 }
 
-// Keep menu pacing independent of the gameplay limiter's timestamps and setting.
+// Keep menu pacing independent of the gameplay limiter's timestamps.
 static FrameLimiter menuFpsLimiter;
-static float menuFrameLimit = 60.0f;
-static bool menuFrameLimitChanged = false;
 
 static void LimitMenuFrame()
 {
-    if (menuFrameLimit <= 0.0f)
-        return;
-
     static bool initialized = false;
-    if (!initialized || menuFrameLimitChanged)
+    static int limit = 0;
+    const int wanted = MenuFrameLimit();
+    if (wanted <= 0)
+    {
+        limit = 0;
+        return;
+    }
+
+    // Started again when the limit changed, or after the menus ran without one
+    if (!initialized || wanted != limit)
     {
         if (!initialized)
             timeBeginPeriod(1);
-        menuFpsLimiter.Init(FrameLimiter::FPS_ACCURATE, menuFrameLimit);
+        menuFpsLimiter.Init(FrameLimiter::FPS_ACCURATE, static_cast<float>(wanted));
         initialized = true;
-        menuFrameLimitChanged = false;
+        limit = wanted;
     }
     menuFpsLimiter.Sync();
 }
@@ -610,12 +640,11 @@ public:
             OnSettingChange("MAIN.FPSLimit", NativeRows::ApplyLimiter);
             WFP::onGameProcessEvent() += NativeRows::Update;
 
-            menuFrameLimit = static_cast<float>(std::max(0, FixSettings().Int("MAIN.FPSLimitMenus")));
-            OnSettingChange("MAIN.FPSLimitMenus", []()
-            {
-                menuFrameLimit = static_cast<float>(std::max(0, FixSettings().Int("MAIN.FPSLimitMenus")));
-                menuFrameLimitChanged = true;
-            });
+            // The menus' limit follows the Frame Limiter with On; the game's Restore Defaults put the fix's limit on the
+            // game's row too (its own default is 30)
+            MenuLimit::GameLimited = FrameLimit() > 0;
+            WFP::onGameProcessEvent() += MenuLimit::Update;
+            FixOptions::OnLimiterRestored(NativeRows::ApplyLimiter);
 
             auto pattern = hook::pattern("B9 ? ? ? ? ? ? ? E8 ? ? ? ? 50 E8 ? ? ? ? 83 C4 ? 8B 46");
             CText::TheText = *pattern.get_first<void*>(1);

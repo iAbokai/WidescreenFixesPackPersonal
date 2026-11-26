@@ -97,6 +97,7 @@ namespace
     constexpr uint8_t ActionOpen = 0xD0;
     constexpr uint8_t ActionJoined = 0xE0;  // the fix's rows on the game's screens: ActionJoined + index of Joined
     constexpr uint8_t ActionAntiAliasing = 0x2C;    // the game's Anti Aliasing row (FED_AAS)
+    constexpr uint8_t ActionFrameLimiter = 0x18;    // the game's Frame Limiter row (FEM_FRM)
     constexpr uint8_t TypeButton = 11, TypeValue = 12;
     constexpr uint8_t AlignLeft = 1, AlignCenter = 3;
 
@@ -106,6 +107,9 @@ namespace
     constexpr size_t MainMenu = 0xE9;
     constexpr size_t CurrentPage = 0x15D;
     constexpr size_t HelperMessage = 0x1B18;    // the game's own notice in the helper text (0: none)
+    constexpr size_t HelperTimer = 0x1AEC;      // its time left (300 when it is set)
+    constexpr int32_t HelperApply = 1;          // "Apply new setting" (FET_APP), shown until the choice is applied
+    constexpr int32_t HelperRestored = 3;       // "Original setting restored" (FET_RSO), shown for a while
     constexpr size_t AntiAliasingActive = 0xC8; // the MSAA level in use (1: off) and the one chosen in the menu
     constexpr size_t AntiAliasingPref = 0xCC;
 
@@ -137,22 +141,41 @@ namespace
     // The fix's settings on the game's own screens, each after the game's row of that key. A row with a .cfg setting
     // ("shown", on by default, applies at the next start) is left out when that is off: the setting then stays in the
     // .cfg and FusionFixHub only. Anti Aliasing is not here: it is the game's row, which also chooses SMAA (see
-    // ChangeAntiAliasing)
+    // ChangeAntiAliasing). A row "inPlace" has no line of its own: it takes turns with the game's row of that key in
+    // the same line (see ShowMenuLimiter)
     struct JoinedSetting
     {
         const char* id;
         int screen;
         const char* after;
         const char* shown;
+        bool inPlace;
     };
     constexpr JoinedSetting Joined[] =
     {
-        { "GRAPHICS.ConsoleGamma", ScreenDisplay, "FED_BRI", "MAIN.ConsoleGammaMenu" },
-        { "MAIN.FPSLimitMenus", ScreenAdvanced, "FEM_FRM", nullptr },
-        { "MAIN.FOVFactor", ScreenAdvanced, "FED_WIS", "MAIN.FOVMenu" },
+        { "GRAPHICS.ConsoleGamma", ScreenDisplay, "FED_BRI", "MAIN.ConsoleGammaMenu", false },
+        { "MAIN.FPSLimitMenus", ScreenAdvanced, "FEM_FRM", nullptr, true },
+        { "MAIN.FOVFactor", ScreenAdvanced, "FED_WIS", "MAIN.FOVMenu", false },
     };
     bool bJoined = false;                   // the rows are on the game's screens
     bool JoinedWanted[std::size(Joined)]{}; // the .cfg shows each of them
+
+    // The Frame Limiter (the gameplay limit, the game's row) and the Frame Limiter Menu (the menus' limit, the fix's row)
+    // share one line of the Advanced screen: it shows the Frame Limiter, Enter on it shows the Frame Limiter Menu in its
+    // place (and Enter on that the Frame Limiter again), and leaving the screen puts the Frame Limiter back
+    int LimiterLine = -1;                   // the screen's entry of the line (-1: the rows are not shared)
+    int LimiterJoined = -1;                 // the index in Joined of the Frame Limiter Menu
+    CMenuEntry GameLimiter{}, MenuLimiter{};
+    bool MenuLimiterShown = false;
+    void(*LimiterRestored)() = nullptr;     // Menu.ixx: the game's Restore Defaults put back its own limit
+
+    void ShowMenuLimiter(bool menus)
+    {
+        if (LimiterLine < 0 || !aScreens)
+            return;
+        aScreens[ScreenAdvanced].entries[LimiterLine] = menus ? MenuLimiter : GameLimiter;
+        MenuLimiterShown = menus;
+    }
 
     // The settings on the game's screens: their rows are the ones on the screen, the others are the .cfg's alone
     std::set<std::string> JoinedIds(int screen = -1)
@@ -378,6 +401,8 @@ namespace
     void Update(uint8_t* manager)
     {
         Manager = manager;
+        if (MenuLimiterShown && Screen(manager) != ScreenAdvanced)
+            ShowMenuLimiter(false);
         if (State == Mode::None)
         {
             int screen = Screen(manager);
@@ -442,6 +467,20 @@ namespace
             down = up = 0;
         }
         reinterpret_cast<void(__fastcall*)(uint8_t*, void*, int32_t, int32_t, int32_t, int32_t, int32_t)>(ProcessUserInputPrevious)(manager, edx, down, up, enter, exit, wheel);
+    }
+
+    // The Anti Aliasing row of the Advanced screen is the selected one
+    bool AntiAliasingSelected(uint8_t* manager)
+    {
+        const int option = Option(manager);
+        return Screen(manager) == ScreenAdvanced && option >= 0 && option < RowCount &&
+            aScreens[ScreenAdvanced].entries[option].action == ActionAntiAliasing;
+    }
+
+    // Off or SMAA was chosen on the Anti Aliasing row and is not applied yet
+    bool AntiAliasingPending()
+    {
+        return PendingSmaa != (FixSettings().Int("GRAPHICS.AntiAliasing") == 1);
     }
 
     // The game's Anti Aliasing row is its MSAA level (1: off, else the number of samples), chosen with left and right
@@ -510,12 +549,24 @@ namespace
         int screen = Screen(manager);
         if (State == Mode::None && screen == ScreenAdvanced && aScreens[screen].entries[option].action == ActionAntiAliasing)
             return ChangeAntiAliasing(manager, dir);
+        // Enter on the line of the two frame limiters shows the other one
+        if (State == Mode::None && dir == 0 && screen == ScreenAdvanced && option == LimiterLine && JoinedScreen(screen))
+        {
+            ShowMenuLimiter(!MenuLimiterShown);
+            FillJoined();
+            return true;
+        }
         if (State == Mode::None && JoinedScreen(screen))
         {
-            auto joined = JoinedRow(aScreens[screen].entries[option].action - ActionJoined);
+            const int index = aScreens[screen].entries[option].action - ActionJoined;
+            auto joined = JoinedRow(index);
             if (!joined)
                 return false;
-            Model.Change(*joined, dir > 0 ? 1 : dir < 0 ? -1 : 0, InGame(manager));
+            const int step = dir > 0 ? 1 : dir < 0 ? -1 : 0;
+            Model.Change(*joined, step, InGame(manager));
+            // "On" is the gameplay limit: there is none to follow while the Frame Limiter is off, so it is skipped
+            if (index == LimiterJoined && step && FixSettings().Int("MAIN.FPSLimitMenus") < 0 && FixSettings().Int("MAIN.FPSLimit") <= 0)
+                Model.Change(*joined, step, InGame(manager));
             FillJoined();
             return true;
         }
@@ -708,9 +759,21 @@ namespace
         return true;
     }
 
+    // The game's notice "Apply new setting" is for an MSAA level that was chosen and not applied. Off and SMAA are chosen
+    // the same way, but are no level of the game: its notice is set for them here, and it takes it back by itself (as for
+    // a level) once the choice is the one in use, and shows "Original setting restored" when the choice is dropped (see
+    // BeginMenuDraw)
+    void AntiAliasingNotice(uint8_t* manager)
+    {
+        if (bReady && MaxMultiSampling && State == Mode::None && manager && AntiAliasingSelected(manager) && AntiAliasingPending())
+            *reinterpret_cast<int32_t*>(manager + HelperMessage) = HelperApply;
+    }
+
     // The game's general notice (no key) gives way to the description of the fix's selected row
     void __fastcall HelperText(uint8_t* manager, void* edx, const char* key)
     {
+        if (!key)
+            AntiAliasingNotice(manager);
         if (!key && RowHelp(manager, edx))
             return;
         reinterpret_cast<HelperFn>(HelperTextPrevious)(manager, edx, key);
@@ -785,7 +848,8 @@ namespace
                     continue;
                 if (EntryNamed(page, Joined[i].after) < 0)
                     return false;
-                ++added;
+                if (!Joined[i].inPlace)
+                    ++added;
             }
             if (RowsOf(page) + added > RowCount)
                 return false;
@@ -793,7 +857,7 @@ namespace
         bool any = false;
         for (int i = 0; i < int(std::size(Joined)); ++i)
         {
-            if (!JoinedWanted[i])
+            if (!JoinedWanted[i] || Joined[i].inPlace)
                 continue;
             auto& page = aScreens[Joined[i].screen];
             int count = RowsOf(page);
@@ -827,11 +891,30 @@ namespace
                 page.entries[count - 1] = {};
             }
         }
+        // The rows that share the line of a game row, once the lines have found their places
+        for (int i = 0; i < int(std::size(Joined)); ++i)
+        {
+            if (!JoinedWanted[i] || !Joined[i].inPlace)
+                continue;
+            auto& page = aScreens[Joined[i].screen];
+            int line = EntryNamed(page, Joined[i].after);
+            if (line < 0 || page.entries[line].action != ActionFrameLimiter || Joined[i].screen != ScreenAdvanced)
+                continue;
+            char key[8];
+            sprintf_s(key, "WFPJ%02d", i);
+            GameLimiter = page.entries[line];
+            SetEntry(MenuLimiter, ActionJoined + i, key, TypeValue, GameLimiter.x, GameLimiter.y, GameLimiter.align);
+            MenuLimiter.targetMenu = int8_t(Joined[i].screen);
+            LimiterLine = line;
+            LimiterJoined = i;
+            any = true;
+        }
         return any;
     }
 
     // CMenuManager::SetDefaultPreferences at the game's Restore Defaults (after its question): the fix's rows of that
-    // screen too
+    // screen too. Display Setup and Advanced share the game's defaults, which put back its own Frame Limiter (30 FPS):
+    // the fix's limit replaces it
     void* SetDefaultsPrevious = nullptr;
     void __fastcall SetDefaults(uint8_t* manager, void* edx, int8_t screen)
     {
@@ -839,6 +922,12 @@ namespace
         auto ids = JoinedIds(screen);
         if (screen == ScreenAdvanced && bReady && MaxMultiSampling)
             ids.insert("GRAPHICS.AntiAliasing");
+        if (screen == ScreenDisplay || screen == ScreenAdvanced)
+        {
+            RWGTAMenu::RestoreDefaults(FixSettings(), { "MAIN.FPSLimit" });
+            if (LimiterRestored)
+                LimiterRestored();
+        }
         if (!ids.empty())
         {
             RWGTAMenu::RestoreDefaults(FixSettings(), ids);
@@ -888,6 +977,13 @@ export namespace FixOptions
 
 export namespace FixOptions
 {
+    // Menu.ixx: called after the game's Restore Defaults of Display Setup and Advanced, once the fix's Frame Rate Limit
+    // is back to its default, to put it on the game's Frame Limiter row
+    void OnLimiterRestored(void(*callback)())
+    {
+        LimiterRestored = callback;
+    }
+
     // A text of the fix in the game's font, in the language of the menus
     std::string GameText(const char* key, bool upper = false)
     {
@@ -901,16 +997,23 @@ export namespace FixOptions
     {
         ValueAreas.bounds.clear();
 
+        // The line of the two frame limiters shows the game's again once the screen is left
+        if (bReady && MenuLimiterShown && manager && Screen(manager) != ScreenAdvanced)
+            ShowMenuLimiter(false);
+
         // The game drops an MSAA level that was chosen on the Anti Aliasing row but not applied once the cursor leaves
-        // the row (or the screen), and the row shows the level in use again. Off and SMAA are the same choice made by
-        // this fix: they are dropped at the same moment, back to what the setting says
-        if (bReady && MaxMultiSampling && State == Mode::None && manager)
+        // the row (or the screen), and the row shows the level in use again, with its notice "Original setting
+        // restored" on Display Setup and Advanced. Off and SMAA are the same choice made by this fix: they are dropped at
+        // the same moment, back to what the setting says, with the same notice
+        if (bReady && MaxMultiSampling && State == Mode::None && manager && !AntiAliasingSelected(manager) && AntiAliasingPending())
         {
-            const int option = Option(manager);
-            const bool onRow = Screen(manager) == ScreenAdvanced && option >= 0 && option < RowCount &&
-                aScreens[ScreenAdvanced].entries[option].action == ActionAntiAliasing;
-            if (!onRow)
-                PendingSmaa = FixSettings().Int("GRAPHICS.AntiAliasing") == 1;
+            PendingSmaa = FixSettings().Int("GRAPHICS.AntiAliasing") == 1;
+            const int screen = Screen(manager);
+            if (screen == ScreenDisplay || screen == ScreenAdvanced)
+            {
+                *reinterpret_cast<int32_t*>(manager + HelperMessage) = HelperRestored;
+                *reinterpret_cast<int32_t*>(manager + HelperTimer) = 300;
+            }
         }
     }
 

@@ -349,11 +349,15 @@
     {
       "id": "MAIN.FPSLimitMenus",
       "type": "int",
-      "default": 60,
-      "min": 0,
+      "default": -1,
+      "min": -1,
       "max": 1000,
       "unit": "fps",
       "special": [
+        {
+          "value": -1,
+          "label": "@menufps.on"
+        },
         {
           "value": 0,
           "label": "@off"
@@ -387,9 +391,9 @@
         "cycler"
       ],
       "presets": {
-        "vanilla": 30,
-        "recommended": 60,
-        "enhanced": 60
+        "vanilla": -1,
+        "recommended": -1,
+        "enhanced": -1
       }
     },
     {

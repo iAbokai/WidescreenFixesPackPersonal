@@ -569,7 +569,7 @@ namespace
                 return false;
             const int step = dir > 0 ? 1 : dir < 0 ? -1 : 0;
             Model.Change(*joined, step, InGame(manager));
-            // "Match" is the gameplay limit: there is none to follow while the Frame Limiter is off, so it is skipped
+            // "Sync" is the gameplay limit: there is none to follow while the Frame Limiter is off, so it is skipped
             if (index == LimiterJoined && step && FixSettings().Int("MAIN.FPSLimitMenus") < 0 && FixSettings().Int("MAIN.FPSLimit") <= 0)
                 Model.Change(*joined, step, InGame(manager));
             FillJoined();

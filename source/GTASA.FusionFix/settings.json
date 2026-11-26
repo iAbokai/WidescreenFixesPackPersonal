@@ -355,12 +355,12 @@
       "unit": "fps",
       "special": [
         {
-          "value": -1,
-          "label": "@menufps.on"
-        },
-        {
           "value": 0,
           "label": "@off"
+        },
+        {
+          "value": -1,
+          "label": "@menufps.same"
         }
       ],
       "suggestions": [

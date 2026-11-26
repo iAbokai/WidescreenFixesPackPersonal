@@ -564,7 +564,7 @@ namespace
                 return false;
             const int step = dir > 0 ? 1 : dir < 0 ? -1 : 0;
             Model.Change(*joined, step, InGame(manager));
-            // "On" is the gameplay limit: there is none to follow while the Frame Limiter is off, so it is skipped
+            // "Same Limit" is the gameplay limit: there is none to follow while the Frame Limiter is off, so it is skipped
             if (index == LimiterJoined && step && FixSettings().Int("MAIN.FPSLimitMenus") < 0 && FixSettings().Int("MAIN.FPSLimit") <= 0)
                 Model.Change(*joined, step, InGame(manager));
             FillJoined();
@@ -741,13 +741,31 @@ namespace
     using HelperFn = void(__fastcall*)(uint8_t*, void*, const char*);
     void* HelperTextPrevious = nullptr;
 
+    // The line of the two frame limiters: a short notice of how to switch to the other one, in place of the description
+    const char* LimiterHint(uint8_t* manager)
+    {
+        if (LimiterLine < 0 || State != Mode::None || Screen(manager) != ScreenAdvanced || Option(manager) != LimiterLine ||
+            *reinterpret_cast<int32_t*>(manager + HelperMessage))
+            return nullptr;
+        return MenuLimiterShown ? "menufps.switch.game" : "menufps.switch.menu";
+    }
+
     // The selected row's description as the game's helper text: right-aligned at the bottom, wrapped inside the menu
     bool RowHelp(uint8_t* manager, void* edx)
     {
-        auto row = bReady ? SelectedRow(manager) : nullptr;
-        if (!row)
+        if (!bReady)
             return false;
-        SetText("WFPHELP", Model.Help(*row));
+        if (auto hint = LimiterHint(manager))
+        {
+            SetText("WFPHELP", RWGTAMenu::PluginText(FixSettings(), LanguageTag(), hint));
+        }
+        else
+        {
+            auto row = SelectedRow(manager);
+            if (!row)
+                return false;
+            SetText("WFPHELP", Model.Help(*row));
+        }
         if (Texts["WFPHELP"].empty())
             return false;
         float wrap = RightJustifyWrap.is_initialized() ? *RightJustifyWrap : 0.0f;

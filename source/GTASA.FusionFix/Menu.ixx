@@ -276,7 +276,7 @@ static int FrameLimit()
     return std::max(0, fps);
 }
 
-// The menus' frame rate limit (MAIN.FPSLimitMenus, 0: none, -1: Same Limit, the gameplay limit)
+// The menus' frame rate limit (MAIN.FPSLimitMenus, 0: none, -1: Match, the gameplay limit)
 static int MenuFrameLimit()
 {
     static auto& fps = FixSettings().Int("MAIN.FPSLimitMenus");
@@ -366,10 +366,10 @@ namespace NativeRows
     }
 }
 
-// "Same Limit" for the menus' limit (MAIN.FPSLimitMenus -1) is the gameplay limit, which only exists while the Frame
-// Limiter is on: it becomes Off when the Frame Limiter is turned off, and an Off of the menus' limit becomes Same Limit
-// again when the Frame Limiter is turned on again (the Frame Limiter Menu row of Options.ixx also leaves out Same Limit
-// while there is no limit)
+// "Match" for the menus' limit (MAIN.FPSLimitMenus -1) is the gameplay limit, which only exists while the Frame Limiter
+// is on: it becomes Off when the Frame Limiter is turned off, and an Off of the menus' limit becomes Match again when
+// the Frame Limiter is turned on again (the Frame Limiter Menu row of Options.ixx also leaves out Match while there is
+// no limit)
 namespace MenuLimit
 {
     bool GameLimited = true;
@@ -641,7 +641,7 @@ public:
             OnSettingChange("MAIN.FPSLimit", NativeRows::ApplyLimiter);
             WFP::onGameProcessEvent() += NativeRows::Update;
 
-            // The menus' limit follows the Frame Limiter with Same Limit; the game's Restore Defaults put the fix's limit on the
+            // The menus' limit follows the Frame Limiter with Match; the game's Restore Defaults put the fix's limit on the
             // game's row too (its own default is 30)
             MenuLimit::GameLimited = FrameLimit() > 0;
             WFP::onGameProcessEvent() += MenuLimit::Update;

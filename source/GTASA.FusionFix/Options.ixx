@@ -219,12 +219,17 @@ namespace
     }
 
     // San Andreas' font is 8 bits with the same table as III and Vice City
-    void SetText(const std::string& key, const std::string& utf8)
+    std::string InGameFont(const std::string& utf8)
     {
         std::string text;
         for (auto c : RWGTAMenu::ToGameFont(utf8, false))
             text += char(c < 0x100 ? c : '?');
-        Texts[key] = text;
+        return text;
+    }
+
+    void SetText(const std::string& key, const std::string& utf8)
+    {
+        Texts[key] = InGameFont(utf8);
     }
 
     void SetEntry(CMenuEntry& entry, uint8_t action, const char* name, uint8_t type, int16_t x, int16_t y, uint8_t align)
@@ -564,7 +569,7 @@ namespace
                 return false;
             const int step = dir > 0 ? 1 : dir < 0 ? -1 : 0;
             Model.Change(*joined, step, InGame(manager));
-            // "Same Limit" is the gameplay limit: there is none to follow while the Frame Limiter is off, so it is skipped
+            // "Match" is the gameplay limit: there is none to follow while the Frame Limiter is off, so it is skipped
             if (index == LimiterJoined && step && FixSettings().Int("MAIN.FPSLimitMenus") < 0 && FixSettings().Int("MAIN.FPSLimit") <= 0)
                 Model.Change(*joined, step, InGame(manager));
             FillJoined();
@@ -652,6 +657,15 @@ namespace
     void* TitleTextPrevious = nullptr;
     void* LabelTextPrevious = nullptr;
     void* HelperKeyPrevious = nullptr;
+    void* TheText = nullptr;                // CText's object
+
+    // The game's own text of a key, as the helper text gets it
+    const char* GameKeyText(const char* key)
+    {
+        if (!TheText || !HelperKeyPrevious)
+            return nullptr;
+        return reinterpret_cast<const char* (__fastcall*)(void*, void*, const char*)>(HelperKeyPrevious)(TheText, nullptr, key);
+    }
 
     template<void*& Previous>
     const char* __fastcall AnsweredText(void* text, void* edx, const char* key)
@@ -741,23 +755,31 @@ namespace
     using HelperFn = void(__fastcall*)(uint8_t*, void*, const char*);
     void* HelperTextPrevious = nullptr;
 
-    // The line of the two frame limiters: a short notice of how to switch to the other one, in place of the description
-    const char* LimiterHint(uint8_t* manager)
+    // The line of the two frame limiters is selected, with no notice of the game's own
+    bool LimiterLineSelected(uint8_t* manager)
     {
-        if (LimiterLine < 0 || State != Mode::None || Screen(manager) != ScreenAdvanced || Option(manager) != LimiterLine ||
-            *reinterpret_cast<int32_t*>(manager + HelperMessage))
-            return nullptr;
-        return MenuLimiterShown ? "menufps.switch.game" : "menufps.switch.menu";
+        return LimiterLine >= 0 && State == Mode::None && Screen(manager) == ScreenAdvanced && Option(manager) == LimiterLine &&
+            !*reinterpret_cast<int32_t*>(manager + HelperMessage);
     }
 
-    // The selected row's description as the game's helper text: right-aligned at the bottom, wrapped inside the menu
+    // WFPHELP while it is the notice of the line of the two frame limiters (the pad's buttons replace its keys)
+    const char* LimiterHelpText = nullptr;
+
+    // The selected row's description as the game's helper text: right-aligned at the bottom, wrapped inside the menu. The
+    // line of the two frame limiters has the game's notice of adjusting a value and, under it, that the other limiter is
+    // one press away
     bool RowHelp(uint8_t* manager, void* edx)
     {
+        LimiterHelpText = nullptr;
         if (!bReady)
             return false;
-        if (auto hint = LimiterHint(manager))
+        if (LimiterLineSelected(manager))
         {
-            SetText("WFPHELP", RWGTAMenu::PluginText(FixSettings(), LanguageTag(), hint));
+            std::string text;
+            if (auto adjust = GameKeyText("FET_MIG"))
+                text = std::string(adjust) + "~n~";
+            Texts["WFPHELP"] = text + InGameFont(RWGTAMenu::PluginText(FixSettings(), LanguageTag(), "menufps.switch.keys"));
+            LimiterHelpText = Texts["WFPHELP"].c_str();
         }
         else
         {
@@ -1011,6 +1033,15 @@ export namespace FixOptions
         return text;
     }
 
+    // ButtonIcons.ixx: the notice of the line of the two frame limiters with the pad's buttons ({A}...), when that is the
+    // text about to be drawn (empty: it is not)
+    std::string PadHelpOf(const char* text)
+    {
+        if (!text || text != LimiterHelpText)
+            return {};
+        return GameText("padhelp.adjust") + "~n~" + GameText("menufps.switch.pad");
+    }
+
     void BeginMenuDraw(uint8_t* manager)
     {
         ValueAreas.bounds.clear();
@@ -1130,6 +1161,7 @@ public:
             auto helperX = hook::pattern("68 00 80 18 44 E8 ? ? ? ? 51 D9 1C 24");
             auto wrap = hook::pattern("68 00 00 20 41 E8 ? ? ? ? 83 C4 08 80 BD 5D 01 00 00 26");
             HelperKeyPrevious = injector::MakeCALL(helperKey.get_first(10), AnsweredText<HelperKeyPrevious>, true).get();
+            TheText = *helperKey.get_first<void*>(6);
             HelperTextPrevious = injector::MakeCALL(helper.get_first(30), HelperText, true).get();
             // The Options screen has no helper text of its own: the fix's pages get theirs before the switch
             static auto PageHelpHook = safetyhook::create_mid(helper.get_first(), [](SafetyHookContext& regs)

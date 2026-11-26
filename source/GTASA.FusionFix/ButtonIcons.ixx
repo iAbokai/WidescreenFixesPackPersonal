@@ -567,6 +567,12 @@ namespace
     {
         if (!text || !GetText || !Pad::IsPadLastDevice())
             return text;
+        // The fix's own helper text (Options.ixx) has its pad version
+        if (auto own = FixOptions::PadHelpOf(text); !own.empty())
+        {
+            PadHelpText = WithPadTokens(own);
+            return PadHelpText.c_str();
+        }
         for (auto& help : PadHelps)
         {
             if (GetText(TheText, nullptr, help.gameKey) == text)

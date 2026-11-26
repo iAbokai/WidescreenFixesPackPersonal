@@ -360,7 +360,7 @@
         },
         {
           "value": -1,
-          "label": "@menufps.same"
+          "label": "@menufps.match"
         }
       ],
       "suggestions": [

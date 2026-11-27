@@ -5,6 +5,9 @@ module;
 #include "FixSettings.hpp"
 #include <mmsystem.h>
 #include <d3d9.h>
+#include <dwmapi.h>
+#include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -609,17 +612,18 @@ static void LimitMenuFrame()
 
 // Temporary diagnostics for the stutter of the dancing minigames at a 30 FPS limit: FusionFix_Frames.log in the game's folder
 // has the frames that came much later or earlier than the limit asks for (how long the game worked, how long the limiter
-// waited, the time step the game used) and a summary of every ten seconds of play: besides the frames, how long the GPU took
-// to finish them, how long the Present call took and how regularly it returned. The menus and the frame after them are left out.
+// waited, the time step the game used) and a summary of every ten seconds of play: besides the frames, where in the display's
+// refresh the Present calls fell, how long they took and how regularly they returned, and what the window manager counted
+// of the display (refreshes, frames dropped, missed). The menus and the frame after them are left out.
 namespace FrameLog
 {
     FILE* Out = nullptr;
     double Frequency = 0.0;
     double PreviousLeft = 0.0, WindowStart = 0.0, Average = 0.0;
     double Longest = 0.0, Shortest = 0.0, WorkTotal = 0.0, WorkLongest = 0.0;
-    double GpuTotal = 0.0, GpuLongest = 0.0, PresentTotal = 0.0, PresentLongest = 0.0;
+    double PresentTotal = 0.0, PresentLongest = 0.0;
     double PreviousReturn = 0.0, ReturnShortest = 0.0, ReturnLongest = 0.0;
-    uint32_t Frames = 0, Slow = 0, Fast = 0, Lines = 0, AtEnd = 0, Presents = 0;
+    uint32_t Frames = 0, Slow = 0, Fast = 0, Lines = 0, AtEnd = 0, Presents = 0, Locked = 0, Quarters[4]{};
     bool Described = false;
 
     double Now()
@@ -633,6 +637,42 @@ namespace FrameLog
         LARGE_INTEGER counter;
         QueryPerformanceCounter(&counter);
         return static_cast<double>(counter.QuadPart) / Frequency;
+    }
+
+    // What the window manager says about the display: when a refresh started (in the milliseconds of Now()), how long a
+    // refresh is, and its own counts since the start
+    struct DisplayTiming
+    {
+        double vblank = 0.0;
+        double period = 0.0;
+        unsigned long long refreshes = 0, dropped = 0, missed = 0, late = 0;
+    };
+
+    bool QueryDisplayTiming(DisplayTiming& timing)
+    {
+        typedef HRESULT(WINAPI* GetTimingInfo)(HWND, DWM_TIMING_INFO*);
+        static GetTimingInfo getTimingInfo = nullptr;
+        static bool tried = false;
+        if (!tried)
+        {
+            tried = true;
+            if (auto dwm = LoadLibraryW(L"dwmapi.dll"))
+                getTimingInfo = reinterpret_cast<GetTimingInfo>(GetProcAddress(dwm, "DwmGetCompositionTimingInfo"));
+        }
+        if (!getTimingInfo)
+            return false;
+        DWM_TIMING_INFO info{};
+        info.cbSize = sizeof(info);
+        if (FAILED(getTimingInfo(nullptr, &info)) || !info.qpcRefreshPeriod || !info.qpcVBlank)
+            return false;
+        Now();      // the frequency
+        timing.vblank = static_cast<double>(info.qpcVBlank) / Frequency;
+        timing.period = static_cast<double>(info.qpcRefreshPeriod) / Frequency;
+        timing.refreshes = info.cRefresh;
+        timing.dropped = info.cFramesDropped;
+        timing.missed = info.cFramesMissed;
+        timing.late = info.cFramesLate;
+        return timing.period > 1.0;
     }
 
     void Write(const char* format, ...)
@@ -663,6 +703,20 @@ namespace FrameLog
         fflush(Out);
     }
 
+    // Whether the swap chain is a window's (the window manager shows its frames) and not the full screen's
+    bool IsWindowed(IDirect3DDevice9* device)
+    {
+        IDirect3DSwapChain9* chain = nullptr;
+        bool windowed = false;
+        if (SUCCEEDED(device->GetSwapChain(0, &chain)) && chain)
+        {
+            D3DPRESENT_PARAMETERS pp{};
+            windowed = SUCCEEDED(chain->GetPresentParameters(&pp)) && pp.Windowed;
+            chain->Release();
+        }
+        return windowed;
+    }
+
     // How the frames reach the screen: the swap chain's settings and the refresh rate of the display
     void Describe(IDirect3DDevice9* device)
     {
@@ -689,6 +743,11 @@ namespace FrameLog
         HMONITOR handle = MonitorFromWindow(window ? window : GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
         if (GetMonitorInfoW(handle, reinterpret_cast<MONITORINFO*>(&monitor)) && EnumDisplaySettingsW(monitor.szDevice, ENUM_CURRENT_SETTINGS, &mode))
             Write("display %ls: %lux%lu at %lu Hz", monitor.szDevice, mode.dmPelsWidth, mode.dmPelsHeight, mode.dmDisplayFrequency);
+        DisplayTiming timing;
+        if (QueryDisplayTiming(timing))
+            Write("window manager: a refresh takes %.4f ms (%.3f Hz)", timing.period, 1000.0 / timing.period);
+        else
+            Write("window manager: no timing of the display");
     }
 
     // The menus, loading and pauses: the next frame has nothing to be compared with
@@ -700,22 +759,31 @@ namespace FrameLog
 
     void Summary(double now, int limit)
     {
+        static DisplayTiming before;
+        static bool haveBefore = false;
         if (Frames)
         {
             Write("10 s: %u frames, average %.2f ms (%.1f fps), shortest %.1f, longest %.1f | work average %.1f, longest %.1f | %u late, %u early, %u limited at the end of the frame (limit %d fps)",
                 Frames, (now - WindowStart) / Frames, Frames * 1000.0 / (now - WindowStart), Shortest, Longest, WorkTotal / Frames, WorkLongest, Slow, Fast, AtEnd, limit);
             if (Presents)
-                Write("     gpu wait average %.2f, longest %.1f | Present call average %.2f, longest %.1f | Present returned every %.1f to %.1f ms",
-                    GpuTotal / Frames, GpuLongest, PresentTotal / Presents, PresentLongest, ReturnShortest, ReturnLongest);
+                Write("     Present call average %.2f, longest %.1f | Present returned every %.1f to %.1f ms | place in the refresh (quarters from its start) %u %u %u %u | %u of %u frames on the display's schedule",
+                    PresentTotal / Presents, PresentLongest, ReturnShortest, ReturnLongest, Quarters[0], Quarters[1], Quarters[2], Quarters[3], Locked, Frames);
+            DisplayTiming timing;
+            if (haveBefore && QueryDisplayTiming(timing))
+                Write("     window manager in these seconds: %llu refreshes, %llu frames dropped, %llu missed, %llu late", timing.refreshes - before.refreshes,
+                    timing.dropped - before.dropped, timing.missed - before.missed, timing.late - before.late);
         }
-        Frames = Slow = Fast = AtEnd = Presents = 0;
-        Longest = WorkTotal = WorkLongest = GpuTotal = GpuLongest = PresentTotal = PresentLongest = ReturnShortest = ReturnLongest = 0.0;
+        haveBefore = QueryDisplayTiming(before);
+        Frames = Slow = Fast = AtEnd = Presents = Locked = 0;
+        Quarters[0] = Quarters[1] = Quarters[2] = Quarters[3] = 0;
+        Longest = WorkTotal = WorkLongest = PresentTotal = PresentLongest = ReturnShortest = ReturnLongest = 0.0;
         Shortest = 1.0e9;
         WindowStart = now;
     }
 
-    // arrived: the frame reached the limiter, left: the limiter let it go, gpu: how long it waited for the GPU first
-    void Frame(double arrived, double left, int limit, bool atEnd, double gpu)
+    // arrived: the frame reached the limiter, left: the limiter let it go; place: where in the display's refresh that was
+    // (0 to 1 from its start, below 0 when not known), locked: the limiter followed the display's refreshes
+    void Frame(double arrived, double left, int limit, bool atEnd, double place, bool locked)
     {
         AtEnd += atEnd;
         const double previous = PreviousLeft;
@@ -733,10 +801,11 @@ namespace FrameLog
         ++Frames;
         WorkTotal += work;
         WorkLongest = std::max(WorkLongest, work);
-        GpuTotal += gpu;
-        GpuLongest = std::max(GpuLongest, gpu);
         Longest = std::max(Longest, interval);
         Shortest = Shortest > 0.0 ? std::min(Shortest, interval) : interval;
+        Locked += locked;
+        if (place >= 0.0)
+            ++Quarters[std::min(3, static_cast<int>(place * 4.0))];
 
         const bool late = target > 0.0 && interval > target * 1.25;
         const bool early = target > 0.0 && interval < target * 0.75;
@@ -752,8 +821,8 @@ namespace FrameLog
                     step = CTimer::ms_fTimeStep;
             }
             catch (...) {}
-            Write("%s frame: %.1f ms (limit %.1f) = work %.1f + wait %.1f (gpu %.1f) | game's step of the frame before %.3f (%.1f ms)",
-                late ? "late" : "early", interval, target, work, left - arrived, gpu, step, step * 20.0f);
+            Write("%s frame: %.1f ms (limit %.1f) = work %.1f + wait %.1f | game's step of the frame before %.3f (%.1f ms)",
+                late ? "late" : "early", interval, target, work, left - arrived, step, step * 20.0f);
             if (Lines == 400)
                 Write("(the following frames are only counted)");
         }
@@ -800,80 +869,38 @@ static bool HighResolutionSleep(double ms)
     return true;
 }
 
-// The gameplay limiter. External limiters (the driver's frame rate target, for one) hold the frame back when it is
-// finished and let it reach the screen at an exact time; the game's own did the waiting before the frame started, and this
-// one first did it before the frame's Present, where the Present call still had the rest of the GPU's work to wait for
-// (the time it takes varies, so the frames reached the screen unevenly even though the time steps were exact, which showed
-// as a stutter in animations that are smooth: the dancing minigames at 30 FPS). Now the frame waits for the GPU to finish
-// it, then for the next time of a fixed schedule, and only then is presented, which leaves the Present with a flip to do.
-// A frame that is late starts the schedule again from where it is; a late frame is not made up for.
+// The gameplay limiter. A window's frames are shown by the window manager, at the display's refreshes: a frame that is
+// finished a moment before a refresh is shown in it, a moment after it, one refresh later. A limit of 30 FPS on a display
+// of 60 Hz asks for a frame every two refreshes, but a clock that counts 33.33 ms and the display's own never keep the same
+// time: the frames slide across the refreshes, and when they pass the edge of one the frames that come out a little early or
+// late fall on either side of it, some shown one refresh (16.7 ms) sooner than they should, some later: a stutter for a
+// few seconds, and again when they come to the next edge. A limit that is a whole number of refreshes (30 on 60 Hz,
+// 60 and 40 on 120 Hz) follows the display's refreshes instead of the clock: each frame is let go in the middle of its
+// refresh interval, as far from both edges as it can be, and every `cadence` refreshes. The other limits, a full screen
+// and the display without timing keep the clock's schedule. A frame that is late starts the schedule again from where it
+// is; a late frame is not made up for. The wait is just before the frame is presented, where the limiters of external tools
+// have theirs, and not before the frame starts (the game's own did, with the frames reaching the screen unevenly because
+// the time a frame's work takes varies)
 class PresentPacer
 {
+    double fps = 0.0;
     double period = 0.0;    // ms
-    double next = 0.0;      // when the next frame is let go, 0 when the schedule has to start again
+    double next = 0.0;      // the clock's schedule: when the next frame is let go, 0 when it has to start again
+    double slot = 0.0;      // the display's schedule: the middle of the refresh interval of the last frame, 0 when it has to start again
+    int locked = 0;         // the refreshes of the display in a frame when it follows them, 0 when it follows the clock
 
-    static constexpr double SpinTime = 2.5;         // slept until this much before the time, spun for the rest
-    static constexpr double LateTolerance = 1.0;    // a frame later than this much starts the schedule again
-    static constexpr double GpuTimeout = 100.0;     // a GPU that takes longer is not waited for any more
+    static constexpr double SpinTime = 2.5;             // slept until this much before the time, spun for the rest
+    static constexpr double LateTolerance = 1.0;        // by the clock a frame later than this much starts the schedule again
 
-    // Waits until the GPU has executed everything the frame sent to it. Nothing of Direct3D is kept between frames: the
-    // query lives only here, so there is nothing for a Reset of the device to wait for
-    static double WaitForGpu(IDirect3DDevice9* device)
+    // Returns when the time came
+    static double WaitUntil(double target)
     {
-        IDirect3DQuery9* query = nullptr;
-        if (FAILED(device->CreateQuery(D3DQUERYTYPE_EVENT, &query)) || !query)
-            return 0.0;
-        const double start = FrameLog::Now();
-        if (SUCCEEDED(query->Issue(D3DISSUE_END)))
-        {
-            DWORD flags = D3DGETDATA_FLUSH;
-            for (;;)
-            {
-                const HRESULT hr = query->GetData(nullptr, 0, flags);
-                flags = 0;
-                if (hr != S_FALSE)
-                    break;
-                if (FrameLog::Now() - start > GpuTimeout)
-                    break;
-                if (!HighResolutionSleep(0.3))
-                    YieldProcessor();
-            }
-        }
-        query->Release();
-        return FrameLog::Now() - start;
-    }
-
-public:
-    void Start(double fps)
-    {
-        period = fps > 0.0 ? 1000.0 / fps : 0.0;
-        next = 0.0;
-    }
-
-    void Restart()
-    {
-        next = 0.0;
-    }
-
-    // Returns when the frame was let go; gpu is how long it waited for the GPU
-    double Wait(IDirect3DDevice9* device, double& gpu)
-    {
-        gpu = 0.0;
-        if (period <= 0.0)
-            return FrameLog::Now();
-
-        // Only when the frame has the time for it: with a high limit the wait would take the time the game needs
-        if (device && period >= 15.0)
-            gpu = WaitForGpu(device);
-
         double now = FrameLog::Now();
-        if (next <= 0.0 || now - next > LateTolerance)
-            next = now;
         for (;;)
         {
-            const double remaining = next - now;
+            const double remaining = target - now;
             if (remaining <= 0.0)
-                break;
+                return now;
             if (remaining > SpinTime)
             {
                 if (!HighResolutionSleep(remaining - SpinTime) && remaining > SpinTime + 2.0)
@@ -883,7 +910,89 @@ public:
                 YieldProcessor();
             now = FrameLog::Now();
         }
-        next += period;
+    }
+
+public:
+    double Place = -1.0;    // where in the display's refresh the last frame was let go (0 to 1), below 0 when not known
+    bool Locked = false;    // the last frame followed the display's refreshes
+
+    void Start(double limit)
+    {
+        fps = limit;
+        period = limit > 0.0 ? 1000.0 / limit : 0.0;
+        next = slot = 0.0;
+        locked = 0;
+    }
+
+    void Restart()
+    {
+        next = slot = 0.0;
+    }
+
+    // Returns when the frame was let go
+    double Wait(IDirect3DDevice9* device)
+    {
+        Place = -1.0;
+        Locked = false;
+        if (period <= 0.0)
+            return FrameLog::Now();
+
+        FrameLog::DisplayTiming display;
+        const bool known = device && FrameLog::IsWindowed(device) && FrameLog::QueryDisplayTiming(display);
+        int cadence = 0;
+        if (known)
+        {
+            // How many refreshes make a frame, when it is a whole number
+            const double ratio = (1000.0 / display.period) / fps;
+            const int whole = static_cast<int>(ratio + 0.5);
+            if (whole >= 1 && std::fabs(ratio - whole) <= 0.02 * whole)
+                cadence = whole;
+        }
+        if (cadence != locked)
+        {
+            locked = cadence;
+            next = slot = 0.0;
+            if (cadence)
+                FrameLog::Write("the limiter follows the display: a frame every %d refreshes of %.4f ms", cadence, display.period);
+            else
+                FrameLog::Write("the limiter follows the clock");
+        }
+
+        double now = FrameLog::Now();
+        if (cadence)
+        {
+            const double refresh = display.period;
+            const double start = display.vblank;
+            // The middle of the refresh interval that is nearest to t
+            auto middle = [&](double t) { return start + (std::round((t - start) / refresh - 0.5) + 0.5) * refresh; };
+            double target = 0.0;
+            if (slot > 0.0)
+            {
+                // The next slot, moved a little at a time to where the display's refreshes really are
+                target = slot + cadence * refresh;
+                const double error = middle(target) - target;
+                target += std::fabs(error) > 2.0 ? error : std::clamp(error, -0.15, 0.15);
+            }
+            if (slot <= 0.0 || now - target > 0.3 * refresh)
+                target = start + (std::ceil((now - LateTolerance - start) / refresh - 0.5) + 0.5) * refresh;    // the first middle that is not past
+            now = WaitUntil(target);
+            slot = target;
+            Locked = true;
+        }
+        else
+        {
+            if (next <= 0.0 || now - next > LateTolerance)
+                next = now;
+            now = WaitUntil(next);
+            next += period;
+        }
+        if (known)
+        {
+            double inside = std::fmod(now - display.vblank, display.period);
+            if (inside < 0.0)
+                inside += display.period;
+            Place = inside / display.period;
+        }
         return now;
     }
 };
@@ -901,9 +1010,8 @@ static void LimitGameFrame(IDirect3DDevice9* device, bool atEnd)
     bFrameLimited = true;
     const double arrived = FrameLog::Now();
     FrameLog::Describe(device);
-    double gpu = 0.0;
-    const double left = presentPacer.Wait(device, gpu);
-    FrameLog::Frame(arrived, left, static_cast<int>(fGameLimit), atEnd, gpu);
+    const double left = presentPacer.Wait(device);
+    FrameLog::Frame(arrived, left, static_cast<int>(fGameLimit), atEnd, presentPacer.Place, presentPacer.Locked);
 }
 
 static HRESULT __stdcall PresentWithLimit(IDirect3DDevice9* device, const RECT* source, const RECT* dest, HWND window, const RGNDATA* dirty)

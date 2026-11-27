@@ -501,6 +501,27 @@ public:
         return (currentTicks > lastTicks) ? currentTicks - lastTicks : 0;
     }
 
+    // Sleeps for about `ms` milliseconds on a high resolution timer, which wakes up within a millisecond of the time asked
+    // for. Sleep(1) may take up to a tick of the system's timer (15.6 ms), and Sleep(0) hands the processor to any other
+    // thread that is ready for a whole slice: a frame logged with its wait 9 to 12 ms longer than it needed
+    HANDLE hTimer = nullptr;
+    bool bTimerTried = false;
+
+    bool TimerSleep(double ms)
+    {
+        if (!bTimerTried)
+        {
+            bTimerTried = true;
+            hTimer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        }
+        LARGE_INTEGER due;
+        due.QuadPart = -static_cast<LONGLONG>(ms * 10000.0);
+        if (!hTimer || !SetWaitableTimer(hTimer, &due, 0, nullptr, nullptr, FALSE))
+            return false;
+        WaitForSingleObject(hTimer, INFINITE);
+        return true;
+    }
+
     DWORD Sync_SLP()
     {
         if (bFpsLimitWasUpdated)
@@ -519,10 +540,17 @@ public:
             TIME_Ticks = millis_current;
             return 1;
         }
-        else if (TIME_Frametime - millis_delta > 2.0)
-            Sleep(1);
+
+        // Sleeps until a few milliseconds before the frame's time and spins the rest: a sleep may wake up late, a spin can't
+        static constexpr double SpinTime = 2.5;
+        const double remaining = TIME_Frametime - millis_delta;
+        if (remaining > SpinTime)
+        {
+            if (!TimerSleep(remaining - SpinTime) && remaining > SpinTime + 2.0)
+                Sleep(1);
+        }
         else
-            Sleep(0);
+            YieldProcessor();
 
         return 0;
     }

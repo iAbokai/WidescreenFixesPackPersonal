@@ -1096,7 +1096,7 @@ namespace MsaaLog
     uint32_t* GameMaxLevel = nullptr;   // the highest level the device offers
     uint32_t* GameFlags = nullptr;      // bit 0: exclusive (full screen)
     SafetyHookInline ChangeHook, VideoModeHook, ResetHook;
-    SafetyHookMid CheckSite, Reset1Site, Reset1Result, Reset2Site, Reset2Result;
+    SafetyHookMid CheckSite, ReleasedSite, BuiltSite, Reset1Site, Reset1Result, Reset2Site, Reset2Result;
     IDirect3DDevice9** GameDevice = nullptr;        // the game's variable with its device
     D3DPRESENT_PARAMETERS* GameParams = nullptr;    // the parameters it resets the device with
     void* HookedEntry = nullptr;
@@ -1216,7 +1216,7 @@ namespace MsaaLog
         auto table = *reinterpret_cast<void***>(device);
         HookedEntry = table[16];
         ResetHook = safetyhook::create_inline(table[16], ResetDetour);
-        Write("hooked IDirect3DDevice9::Reset at %p (%s)", table[16], ResetHook ? "ok" : "FAILED");
+        Write("hooked IDirect3DDevice9::Reset at %p (%s) in %s", table[16], ResetHook ? "ok" : "FAILED", ModuleOf(table[16]).c_str());
     }
 
     // The game's own calls of Reset in the function that changes the level (the first with the new settings, the second
@@ -1234,6 +1234,39 @@ namespace MsaaLog
     bool Is(const uint8_t* function, size_t at, std::initializer_list<uint8_t> bytes)
     {
         return std::equal(bytes.begin(), bytes.end(), function + at);
+    }
+
+    // The code of the function as it is in memory now, to compare with the game's file (something else may have changed it)
+    void DumpCode(const uint8_t* function)
+    {
+        Write("the function that changes the level is at %p", function);
+        for (size_t at = 0; at < 0x210; at += 32)
+        {
+            char line[32 * 3 + 1]{};
+            for (size_t i = 0; i < 32; ++i)
+                snprintf(line + i * 3, 4, "%02X ", function[at + i]);
+            Write("code +0x%03zX: %s", at, line);
+        }
+    }
+
+    void Trace(SafetyHookMid& hook, const uint8_t* function, size_t at, std::initializer_list<uint8_t> expected, const char* name, void (*destination)(SafetyHookContext&))
+    {
+        if (!Is(function, at, expected))
+        {
+            Write("trace '%s' at +0x%zX: the code there is not the game's, not installed", name, at);
+            return;
+        }
+        hook = safetyhook::create_mid(const_cast<uint8_t*>(function) + at, destination);
+        Write("trace '%s' at +0x%zX: %s", name, at, hook ? "installed" : "NOT installed");
+    }
+
+    std::string ModuleOf(void* address)
+    {
+        char path[MAX_PATH]{};
+        HMODULE module = nullptr;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(address), &module))
+            GetModuleFileNameA(module, path, MAX_PATH);
+        return path;
     }
 
     int __cdecl ChangeDetour(int level)
@@ -1290,34 +1323,37 @@ namespace MsaaLog
             GameFlags = global(0x64, 0x35);
             ChangeHook = safetyhook::create_inline(function, ChangeDetour);
 
-            // Inside the function (offsets of the game's 1.0 code, checked before they are used)
+            // Inside the function (offsets of the game's 1.0 code, each checked against the code that is really there)
+            DumpCode(function);
             if (function[0xBF] == 0xA1)
                 GameDevice = *reinterpret_cast<IDirect3DDevice9***>(function + 0xC0);
             if (function[0x31] == 0xBE)
                 GameParams = *reinterpret_cast<D3DPRESENT_PARAMETERS**>(function + 0x32);
-            if (Is(function, 0x91, { 0x85, 0xC0, 0x7D }))
-                CheckSite = safetyhook::create_mid(function + 0x91, [](SafetyHookContext& regs)
-                {
-                    const HRESULT hr = static_cast<HRESULT>(regs.eax);
-                    Write("CheckDeviceMultiSampleType: level %lu, windowed argument %d -> %s (0x%08lX)", GameLevel ? *GameLevel : 0ul,
-                        static_cast<int>(regs.esi), Hr(hr), static_cast<unsigned long>(hr));
-                });
-            if (Is(function, 0xF1, { 0xFF, 0x51, 0x40, 0x85, 0xC0, 0x0F, 0x8C }))
+            Trace(CheckSite, function, 0x91, { 0x85, 0xC0, 0x7D }, "CheckDeviceMultiSampleType", [](SafetyHookContext& regs)
             {
-                Reset1Site = safetyhook::create_mid(function + 0xF1, [](SafetyHookContext&) { LogResetCall("Reset 1 (the new level)"); });
-                Reset1Result = safetyhook::create_mid(function + 0xF6, [](SafetyHookContext& regs)
-                {
-                    Write("Reset 1 -> %s (0x%08lX)", Hr(static_cast<HRESULT>(regs.eax)), static_cast<unsigned long>(regs.eax));
-                });
-            }
-            if (Is(function, 0x1FE, { 0xFF, 0x52, 0x40, 0x85, 0xC0, 0x7D }))
+                const HRESULT hr = static_cast<HRESULT>(regs.eax);
+                Write("CheckDeviceMultiSampleType: level %lu, windowed argument %d -> %s (0x%08lX)", GameLevel ? *GameLevel : 0ul,
+                    static_cast<int>(regs.esi), Hr(hr), static_cast<unsigned long>(hr));
+            });
+            Trace(ReleasedSite, function, 0xBF, { 0xA1 }, "after the release", [](SafetyHookContext&)
             {
-                Reset2Site = safetyhook::create_mid(function + 0x1FE, [](SafetyHookContext&) { LogResetCall("Reset 2 (the old settings, after Reset 1 failed)"); });
-                Reset2Result = safetyhook::create_mid(function + 0x203, [](SafetyHookContext& regs)
-                {
-                    Write("Reset 2 -> %s (0x%08lX)", Hr(static_cast<HRESULT>(regs.eax)), static_cast<unsigned long>(regs.eax));
-                });
-            }
+                Write("the game's resources are released, it goes on to build the parameters");
+            });
+            Trace(BuiltSite, function, 0xE1, { 0xA1 }, "parameters built", [](SafetyHookContext&)
+            {
+                if (GameParams)
+                    WriteParams("parameters built by the game", *GameParams);
+            });
+            Trace(Reset1Site, function, 0xF1, { 0xFF, 0x51, 0x40, 0x85, 0xC0, 0x0F, 0x8C }, "Reset 1", [](SafetyHookContext&) { LogResetCall("Reset 1 (the new level)"); });
+            Trace(Reset1Result, function, 0xF6, { 0x0F, 0x8C }, "Reset 1 result", [](SafetyHookContext& regs)
+            {
+                Write("Reset 1 -> %s (0x%08lX)", Hr(static_cast<HRESULT>(regs.eax)), static_cast<unsigned long>(regs.eax));
+            });
+            Trace(Reset2Site, function, 0x1FE, { 0xFF, 0x52, 0x40, 0x85, 0xC0, 0x7D }, "Reset 2", [](SafetyHookContext&) { LogResetCall("Reset 2 (the old settings, after Reset 1 failed)"); });
+            Trace(Reset2Result, function, 0x203, { 0x7D }, "Reset 2 result", [](SafetyHookContext& regs)
+            {
+                Write("Reset 2 -> %s (0x%08lX)", Hr(static_cast<HRESULT>(regs.eax)), static_cast<unsigned long>(regs.eax));
+            });
         }
         auto videoMode = hook::pattern("8B 44 24 04 50 E8 ? ? ? ? 83 C4 04 E8 ? ? ? ? A1 ? ? ? ? 8B 48 60");
         if (!videoMode.empty())

@@ -609,14 +609,18 @@ static void LimitMenuFrame()
 
 // Temporary diagnostics for the stutter of the dancing minigames at a 30 FPS limit: FusionFix_Frames.log in the game's folder
 // has the frames that came much later or earlier than the limit asks for (how long the game worked, how long the limiter
-// waited, the time step the game used) and a summary of every ten seconds of play. The menus and the frame after them are left out.
+// waited, the time step the game used) and a summary of every ten seconds of play: besides the frames, how long the GPU took
+// to finish them, how long the Present call took and how regularly it returned. The menus and the frame after them are left out.
 namespace FrameLog
 {
     FILE* Out = nullptr;
     double Frequency = 0.0;
     double PreviousLeft = 0.0, WindowStart = 0.0, Average = 0.0;
     double Longest = 0.0, Shortest = 0.0, WorkTotal = 0.0, WorkLongest = 0.0;
-    uint32_t Frames = 0, Slow = 0, Fast = 0, Lines = 0, AtEnd = 0;
+    double GpuTotal = 0.0, GpuLongest = 0.0, PresentTotal = 0.0, PresentLongest = 0.0;
+    double PreviousReturn = 0.0, ReturnShortest = 0.0, ReturnLongest = 0.0;
+    uint32_t Frames = 0, Slow = 0, Fast = 0, Lines = 0, AtEnd = 0, Presents = 0;
+    bool Described = false;
 
     double Now()
     {
@@ -659,25 +663,59 @@ namespace FrameLog
         fflush(Out);
     }
 
+    // How the frames reach the screen: the swap chain's settings and the refresh rate of the display
+    void Describe(IDirect3DDevice9* device)
+    {
+        if (Described || !device)
+            return;
+        Described = true;
+        HWND window = nullptr;
+        D3DDEVICE_CREATION_PARAMETERS creation{};
+        if (SUCCEEDED(device->GetCreationParameters(&creation)))
+            window = creation.hFocusWindow;
+        IDirect3DSwapChain9* chain = nullptr;
+        if (SUCCEEDED(device->GetSwapChain(0, &chain)) && chain)
+        {
+            D3DPRESENT_PARAMETERS pp{};
+            if (SUCCEEDED(chain->GetPresentParameters(&pp)))
+                Write("swap chain: windowed=%d swap effect=%d back buffers=%u interval=0x%X %ux%u msaa=%d", pp.Windowed, int(pp.SwapEffect),
+                    pp.BackBufferCount, pp.PresentationInterval, pp.BackBufferWidth, pp.BackBufferHeight, int(pp.MultiSampleType));
+            chain->Release();
+        }
+        MONITORINFOEXW monitor{};
+        monitor.cbSize = sizeof(monitor);
+        DEVMODEW mode{};
+        mode.dmSize = sizeof(mode);
+        HMONITOR handle = MonitorFromWindow(window ? window : GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+        if (GetMonitorInfoW(handle, reinterpret_cast<MONITORINFO*>(&monitor)) && EnumDisplaySettingsW(monitor.szDevice, ENUM_CURRENT_SETTINGS, &mode))
+            Write("display %ls: %lux%lu at %lu Hz", monitor.szDevice, mode.dmPelsWidth, mode.dmPelsHeight, mode.dmDisplayFrequency);
+    }
+
     // The menus, loading and pauses: the next frame has nothing to be compared with
     void Restart()
     {
         PreviousLeft = 0.0;
+        PreviousReturn = 0.0;
     }
 
     void Summary(double now, int limit)
     {
         if (Frames)
+        {
             Write("10 s: %u frames, average %.2f ms (%.1f fps), shortest %.1f, longest %.1f | work average %.1f, longest %.1f | %u late, %u early, %u limited at the end of the frame (limit %d fps)",
                 Frames, (now - WindowStart) / Frames, Frames * 1000.0 / (now - WindowStart), Shortest, Longest, WorkTotal / Frames, WorkLongest, Slow, Fast, AtEnd, limit);
-        Frames = Slow = Fast = AtEnd = 0;
-        Longest = WorkTotal = WorkLongest = 0.0;
+            if (Presents)
+                Write("     gpu wait average %.2f, longest %.1f | Present call average %.2f, longest %.1f | Present returned every %.1f to %.1f ms",
+                    GpuTotal / Frames, GpuLongest, PresentTotal / Presents, PresentLongest, ReturnShortest, ReturnLongest);
+        }
+        Frames = Slow = Fast = AtEnd = Presents = 0;
+        Longest = WorkTotal = WorkLongest = GpuTotal = GpuLongest = PresentTotal = PresentLongest = ReturnShortest = ReturnLongest = 0.0;
         Shortest = 1.0e9;
         WindowStart = now;
     }
 
-    // arrived: the frame reached the limiter, left: the limiter let it go
-    void Frame(double arrived, double left, int limit, bool atEnd)
+    // arrived: the frame reached the limiter, left: the limiter let it go, gpu: how long it waited for the GPU first
+    void Frame(double arrived, double left, int limit, bool atEnd, double gpu)
     {
         AtEnd += atEnd;
         const double previous = PreviousLeft;
@@ -695,6 +733,8 @@ namespace FrameLog
         ++Frames;
         WorkTotal += work;
         WorkLongest = std::max(WorkLongest, work);
+        GpuTotal += gpu;
+        GpuLongest = std::max(GpuLongest, gpu);
         Longest = std::max(Longest, interval);
         Shortest = Shortest > 0.0 ? std::min(Shortest, interval) : interval;
 
@@ -712,42 +752,169 @@ namespace FrameLog
                     step = CTimer::ms_fTimeStep;
             }
             catch (...) {}
-            Write("%s frame: %.1f ms (limit %.1f) = work %.1f + wait %.1f | game's step of the frame before %.3f (%.1f ms)",
-                late ? "late" : "early", interval, target, work, left - arrived, step, step * 20.0f);
+            Write("%s frame: %.1f ms (limit %.1f) = work %.1f + wait %.1f (gpu %.1f) | game's step of the frame before %.3f (%.1f ms)",
+                late ? "late" : "early", interval, target, work, left - arrived, gpu, step, step * 20.0f);
             if (Lines == 400)
                 Write("(the following frames are only counted)");
         }
         if (left - WindowStart >= 10000.0)
             Summary(left, limit);
     }
+
+    // The Present call: how long it took and how regularly it returned
+    void Presented(double before, double after)
+    {
+        ++Presents;
+        const double call = after - before;
+        PresentTotal += call;
+        PresentLongest = std::max(PresentLongest, call);
+        if (PreviousReturn > 0.0)
+        {
+            const double gap = after - PreviousReturn;
+            ReturnShortest = ReturnShortest > 0.0 ? std::min(ReturnShortest, gap) : gap;
+            ReturnLongest = std::max(ReturnLongest, gap);
+        }
+        PreviousReturn = after;
+    }
 }
 
 injector::hook_back<bool(__cdecl*)(RsEvent event, void* data)> hbRsEventHandler;
-// The gameplay limiter waits just before the frame is presented, as the limiters of external tools do, and not before
-// the frame starts (the game's own limiter and this one before): the time a frame's work takes varies, and with the wait
-// first the frames reached the screen unevenly even though the game's time steps were exact, which showed as a stutter
-// in animations that are smooth (the dancing minigames at 30 FPS)
-static FrameLimiter fpsLimiter;
+
+// Sleeps for about `ms` milliseconds on a high resolution timer, which wakes up within a millisecond of the time asked for.
+// Sleep(1) may take up to a tick of the system's timer (15.6 ms), and Sleep(0) hands the processor to any other thread that
+// is ready for a whole slice
+static bool HighResolutionSleep(double ms)
+{
+    static HANDLE timer = nullptr;
+    static bool tried = false;
+    if (!tried)
+    {
+        tried = true;
+        timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    }
+    LARGE_INTEGER due;
+    due.QuadPart = -static_cast<LONGLONG>(ms * 10000.0);
+    if (!timer || !SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE))
+        return false;
+    WaitForSingleObject(timer, INFINITE);
+    return true;
+}
+
+// The gameplay limiter. External limiters (the driver's frame rate target, for one) hold the frame back when it is
+// finished and let it reach the screen at an exact time; the game's own did the waiting before the frame started, and this
+// one first did it before the frame's Present, where the Present call still had the rest of the GPU's work to wait for
+// (the time it takes varies, so the frames reached the screen unevenly even though the time steps were exact, which showed
+// as a stutter in animations that are smooth: the dancing minigames at 30 FPS). Now the frame waits for the GPU to finish
+// it, then for the next time of a fixed schedule, and only then is presented, which leaves the Present with a flip to do.
+// A frame that is late starts the schedule again from where it is; a late frame is not made up for.
+class PresentPacer
+{
+    double period = 0.0;    // ms
+    double next = 0.0;      // when the next frame is let go, 0 when the schedule has to start again
+
+    static constexpr double SpinTime = 2.5;         // slept until this much before the time, spun for the rest
+    static constexpr double LateTolerance = 1.0;    // a frame later than this much starts the schedule again
+    static constexpr double GpuTimeout = 100.0;     // a GPU that takes longer is not waited for any more
+
+    // Waits until the GPU has executed everything the frame sent to it. Nothing of Direct3D is kept between frames: the
+    // query lives only here, so there is nothing for a Reset of the device to wait for
+    static double WaitForGpu(IDirect3DDevice9* device)
+    {
+        IDirect3DQuery9* query = nullptr;
+        if (FAILED(device->CreateQuery(D3DQUERYTYPE_EVENT, &query)) || !query)
+            return 0.0;
+        const double start = FrameLog::Now();
+        if (SUCCEEDED(query->Issue(D3DISSUE_END)))
+        {
+            DWORD flags = D3DGETDATA_FLUSH;
+            for (;;)
+            {
+                const HRESULT hr = query->GetData(nullptr, 0, flags);
+                flags = 0;
+                if (hr != S_FALSE)
+                    break;
+                if (FrameLog::Now() - start > GpuTimeout)
+                    break;
+                if (!HighResolutionSleep(0.3))
+                    YieldProcessor();
+            }
+        }
+        query->Release();
+        return FrameLog::Now() - start;
+    }
+
+public:
+    void Start(double fps)
+    {
+        period = fps > 0.0 ? 1000.0 / fps : 0.0;
+        next = 0.0;
+    }
+
+    void Restart()
+    {
+        next = 0.0;
+    }
+
+    // Returns when the frame was let go; gpu is how long it waited for the GPU
+    double Wait(IDirect3DDevice9* device, double& gpu)
+    {
+        gpu = 0.0;
+        if (period <= 0.0)
+            return FrameLog::Now();
+
+        // Only when the frame has the time for it: with a high limit the wait would take the time the game needs
+        if (device && period >= 15.0)
+            gpu = WaitForGpu(device);
+
+        double now = FrameLog::Now();
+        if (next <= 0.0 || now - next > LateTolerance)
+            next = now;
+        for (;;)
+        {
+            const double remaining = next - now;
+            if (remaining <= 0.0)
+                break;
+            if (remaining > SpinTime)
+            {
+                if (!HighResolutionSleep(remaining - SpinTime) && remaining > SpinTime + 2.0)
+                    Sleep(1);
+            }
+            else
+                YieldProcessor();
+            now = FrameLog::Now();
+        }
+        next += period;
+        return now;
+    }
+};
+
+static PresentPacer presentPacer;
 static float fGameLimit = -1.0f;
 static bool bGameFrame = false;         // inside the game's frame (the idle event)
 static bool bFrameLimited = false;      // the frame has waited already
 static SafetyHookInline PresentHook;
 
-static void LimitGameFrame(bool atEnd)
+static void LimitGameFrame(IDirect3DDevice9* device, bool atEnd)
 {
     if (bFrameLimited)
         return;
     bFrameLimited = true;
     const double arrived = FrameLog::Now();
-    fpsLimiter.Sync();
-    FrameLog::Frame(arrived, FrameLog::Now(), static_cast<int>(fGameLimit), atEnd);
+    FrameLog::Describe(device);
+    double gpu = 0.0;
+    const double left = presentPacer.Wait(device, gpu);
+    FrameLog::Frame(arrived, left, static_cast<int>(fGameLimit), atEnd, gpu);
 }
 
 static HRESULT __stdcall PresentWithLimit(IDirect3DDevice9* device, const RECT* source, const RECT* dest, HWND window, const RGNDATA* dirty)
 {
-    if (bGameFrame)
-        LimitGameFrame(false);
-    return PresentHook.unsafe_stdcall<HRESULT>(device, source, dest, window, dirty);
+    if (!bGameFrame)
+        return PresentHook.unsafe_stdcall<HRESULT>(device, source, dest, window, dirty);
+    LimitGameFrame(device, false);
+    const double before = FrameLog::Now();
+    const HRESULT result = PresentHook.unsafe_stdcall<HRESULT>(device, source, dest, window, dirty);
+    FrameLog::Presented(before, FrameLog::Now());
+    return result;
 }
 
 static void HookPresent()
@@ -769,10 +936,10 @@ bool __cdecl RsEventHandler(RsEvent event, void* data)
     if (FrontendMenuManager->m_bMenuActive)
     {
         FrameLog::Restart();
+        presentPacer.Restart();
         return hbRsEventHandler.fun(event, data);
     }
 
-    static constexpr auto mode = FrameLimiter::FPS_ACCURATE;
     static bool bTimerResolutionSet = false;
 
     float fFpsLimit = GetFrameLimiterValue();
@@ -788,7 +955,7 @@ bool __cdecl RsEventHandler(RsEvent event, void* data)
         }
 
         RsGlobal->maxFPS = static_cast<int32_t>(fFpsLimit);
-        fpsLimiter.Init(mode, fFpsLimit);
+        presentPacer.Start(fFpsLimit);
         FrameLog::Restart();
     }
 
@@ -796,7 +963,7 @@ bool __cdecl RsEventHandler(RsEvent event, void* data)
     bFrameLimited = false;
     const bool result = hbRsEventHandler.fun(event, data);
     // Without a Present in the frame (or without the hook on it) the wait comes at the end of the frame
-    LimitGameFrame(true);
+    LimitGameFrame(nullptr, true);
     bGameFrame = false;
     return result;
 }

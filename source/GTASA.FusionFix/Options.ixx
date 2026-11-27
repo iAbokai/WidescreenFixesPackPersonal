@@ -6,10 +6,12 @@ module;
 #include "Shared/RWGTA/FixMenu.hpp"
 #include "Shared/RWGTA/RootPages.hpp"
 #include <d3d9.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -1094,6 +1096,10 @@ namespace MsaaLog
     uint32_t* GameMaxLevel = nullptr;   // the highest level the device offers
     uint32_t* GameFlags = nullptr;      // bit 0: exclusive (full screen)
     SafetyHookInline ChangeHook, VideoModeHook, ResetHook;
+    SafetyHookMid CheckSite, Reset1Site, Reset1Result, Reset2Site, Reset2Result;
+    IDirect3DDevice9** GameDevice = nullptr;        // the game's variable with its device
+    D3DPRESENT_PARAMETERS* GameParams = nullptr;    // the parameters it resets the device with
+    void* HookedEntry = nullptr;
     DWORD WatchUntil = 0, NextWatch = 0;
 
     void Write(const char* format, ...)
@@ -1134,6 +1140,8 @@ namespace MsaaLog
         case D3DERR_INVALIDCALL: return "INVALIDCALL";
         case D3DERR_OUTOFVIDEOMEMORY: return "OUTOFVIDEOMEMORY";
         case D3DERR_DRIVERINTERNALERROR: return "DRIVERINTERNALERROR";
+        case D3DERR_NOTAVAILABLE: return "NOTAVAILABLE";
+        case D3DERR_WASSTILLDRAWING: return "WASSTILLDRAWING";
         case E_OUTOFMEMORY: return "E_OUTOFMEMORY";
         default: return "?";
         }
@@ -1206,8 +1214,26 @@ namespace MsaaLog
         if (ResetHook || !device)
             return;
         auto table = *reinterpret_cast<void***>(device);
+        HookedEntry = table[16];
         ResetHook = safetyhook::create_inline(table[16], ResetDetour);
-        Write("hooked IDirect3DDevice9::Reset at %p", table[16]);
+        Write("hooked IDirect3DDevice9::Reset at %p (%s)", table[16], ResetHook ? "ok" : "FAILED");
+    }
+
+    // The game's own calls of Reset in the function that changes the level (the first with the new settings, the second
+    // with the old ones when the first failed), whatever the device's table says
+    void LogResetCall(const char* which)
+    {
+        void* device = GameDevice ? *GameDevice : nullptr;
+        void** table = device ? *reinterpret_cast<void***>(device) : nullptr;
+        Write("%s: Reset of the game's device %p (table %p, Reset entry %p) | the fix's device %p, hooked entry %p", which, device, table,
+            table ? table[16] : nullptr, Device(), HookedEntry);
+        if (GameParams)
+            WriteParams("  parameters", *GameParams);
+    }
+
+    bool Is(const uint8_t* function, size_t at, std::initializer_list<uint8_t> bytes)
+    {
+        return std::equal(bytes.begin(), bytes.end(), function + at);
     }
 
     int __cdecl ChangeDetour(int level)
@@ -1263,11 +1289,46 @@ namespace MsaaLog
             GameMaxLevel = global(0x3C, 0x0D);
             GameFlags = global(0x64, 0x35);
             ChangeHook = safetyhook::create_inline(function, ChangeDetour);
+
+            // Inside the function (offsets of the game's 1.0 code, checked before they are used)
+            if (function[0xBF] == 0xA1)
+                GameDevice = *reinterpret_cast<IDirect3DDevice9***>(function + 0xC0);
+            if (function[0x31] == 0xBE)
+                GameParams = *reinterpret_cast<D3DPRESENT_PARAMETERS**>(function + 0x32);
+            if (Is(function, 0x91, { 0x85, 0xC0, 0x7D }))
+                CheckSite = safetyhook::create_mid(function + 0x91, [](SafetyHookContext& regs)
+                {
+                    const HRESULT hr = static_cast<HRESULT>(regs.eax);
+                    Write("CheckDeviceMultiSampleType: level %lu, windowed argument %d -> %s (0x%08lX)", GameLevel ? *GameLevel : 0ul,
+                        static_cast<int>(regs.esi), Hr(hr), static_cast<unsigned long>(hr));
+                });
+            if (Is(function, 0xF1, { 0xFF, 0x51, 0x40, 0x85, 0xC0, 0x0F, 0x8C }))
+            {
+                Reset1Site = safetyhook::create_mid(function + 0xF1, [](SafetyHookContext&) { LogResetCall("Reset 1 (the new level)"); });
+                Reset1Result = safetyhook::create_mid(function + 0xF6, [](SafetyHookContext& regs)
+                {
+                    Write("Reset 1 -> %s (0x%08lX)", Hr(static_cast<HRESULT>(regs.eax)), static_cast<unsigned long>(regs.eax));
+                });
+            }
+            if (Is(function, 0x1FE, { 0xFF, 0x52, 0x40, 0x85, 0xC0, 0x7D }))
+            {
+                Reset2Site = safetyhook::create_mid(function + 0x1FE, [](SafetyHookContext&) { LogResetCall("Reset 2 (the old settings, after Reset 1 failed)"); });
+                Reset2Result = safetyhook::create_mid(function + 0x203, [](SafetyHookContext& regs)
+                {
+                    Write("Reset 2 -> %s (0x%08lX)", Hr(static_cast<HRESULT>(regs.eax)), static_cast<unsigned long>(regs.eax));
+                });
+            }
         }
         auto videoMode = hook::pattern("8B 44 24 04 50 E8 ? ? ? ? 83 C4 04 E8 ? ? ? ? A1 ? ? ? ? 8B 48 60");
         if (!videoMode.empty())
             VideoModeHook = safetyhook::create_inline(videoMode.get_first<uint8_t>(), VideoModeDetour);
-        WFP::onBeforeReset() += []() { Write("the fix releases its Direct3D resources for the Reset"); };
+        WFP::onBeforeReset() += []()
+        {
+            // The game repeats it every frame while the device is lost
+            static unsigned count = 0;
+            if (++count <= 5 || count % 1000 == 0)
+                Write("the fix releases its Direct3D resources for a Reset (#%u)", count);
+        };
         WFP::onGameProcessEvent() += Watch;
         HookReset();
     }

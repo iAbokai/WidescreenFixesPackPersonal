@@ -4,12 +4,16 @@ module;
 #include "common.h"
 #include "FixSettings.hpp"
 #include <mmsystem.h>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
 #pragma comment(lib, "winmm.lib") // needed for timeBeginPeriod()/timeEndPeriod()
 
 export module Menu;
 
 import Skeleton;
 import Options;
+import Timer;
 
 export enum eMenuScreen : int8_t
 {
@@ -574,11 +578,128 @@ static void LimitMenuFrame()
     menuFpsLimiter.Sync();
 }
 
+// Temporary diagnostics for the stutter of the dancing minigames at a 30 FPS limit: FusionFix_Frames.log in the game's folder
+// has the frames that came much later or earlier than the limit asks for (how long the game worked, how long the limiter
+// waited, the time step the game used) and a summary of every ten seconds of play. The menus and the frame after them are left out.
+namespace FrameLog
+{
+    FILE* Out = nullptr;
+    double Frequency = 0.0;
+    double PreviousLeft = 0.0, WindowStart = 0.0, Average = 0.0;
+    double Longest = 0.0, Shortest = 0.0, WorkTotal = 0.0, WorkLongest = 0.0;
+    uint32_t Frames = 0, Slow = 0, Fast = 0, Lines = 0;
+
+    double Now()
+    {
+        if (Frequency == 0.0)
+        {
+            LARGE_INTEGER frequency;
+            QueryPerformanceFrequency(&frequency);
+            Frequency = static_cast<double>(frequency.QuadPart) / 1000.0;
+        }
+        LARGE_INTEGER counter;
+        QueryPerformanceCounter(&counter);
+        return static_cast<double>(counter.QuadPart) / Frequency;
+    }
+
+    void Write(const char* format, ...)
+    {
+        if (!Out)
+        {
+            char path[MAX_PATH]{};
+            GetModuleFileNameA(nullptr, path, MAX_PATH);
+            if (auto slash = strrchr(path, '\\'))
+                slash[1] = 0;
+            strcat_s(path, "FusionFix_Frames.log");
+            fopen_s(&Out, path, "a");
+            if (Out && ftell(Out) > 512 * 1024)
+            {
+                fclose(Out);
+                fopen_s(&Out, path, "w");
+            }
+            if (!Out)
+                return;
+            fprintf(Out, "---- session (FusionFix frames log) ----\n");
+        }
+        char text[512];
+        va_list args;
+        va_start(args, format);
+        vsnprintf(text, sizeof(text), format, args);
+        va_end(args);
+        fprintf(Out, "[%10lu] %s\n", GetTickCount(), text);
+        fflush(Out);
+    }
+
+    // The menus, loading and pauses: the next frame has nothing to be compared with
+    void Restart()
+    {
+        PreviousLeft = 0.0;
+    }
+
+    void Summary(double now, int limit)
+    {
+        if (Frames)
+            Write("10 s: %u frames, average %.2f ms (%.1f fps), shortest %.1f, longest %.1f | work average %.1f, longest %.1f | %u late, %u early (limit %d fps)",
+                Frames, (now - WindowStart) / Frames, Frames * 1000.0 / (now - WindowStart), Shortest, Longest, WorkTotal / Frames, WorkLongest, Slow, Fast, limit);
+        Frames = Slow = Fast = 0;
+        Longest = WorkTotal = WorkLongest = 0.0;
+        Shortest = 1.0e9;
+        WindowStart = now;
+    }
+
+    // arrived: the frame reached the limiter, left: the limiter let it go
+    void Frame(double arrived, double left, int limit)
+    {
+        const double previous = PreviousLeft;
+        PreviousLeft = left;
+        if (previous <= 0.0)
+        {
+            Summary(left, limit);
+            return;
+        }
+
+        const double interval = left - previous;
+        const double work = arrived - previous;
+        const double target = limit > 0 ? 1000.0 / limit : Average;
+        Average = Average <= 0.0 ? interval : Average + (interval - Average) * 0.05;
+        ++Frames;
+        WorkTotal += work;
+        WorkLongest = std::max(WorkLongest, work);
+        Longest = std::max(Longest, interval);
+        Shortest = Shortest > 0.0 ? std::min(Shortest, interval) : interval;
+
+        const bool late = target > 0.0 && interval > target * 1.25;
+        const bool early = target > 0.0 && interval < target * 0.75;
+        Slow += late;
+        Fast += early;
+        if ((late || early) && Lines < 400)
+        {
+            ++Lines;
+            float step = 0.0f;
+            try
+            {
+                if (CTimer::ms_fTimeStep.is_initialized())
+                    step = CTimer::ms_fTimeStep;
+            }
+            catch (...) {}
+            Write("%s frame: %.1f ms (limit %.1f) = work %.1f + wait %.1f | game's step of the frame before %.3f (%.1f ms)",
+                late ? "late" : "early", interval, target, work, left - arrived, step, step * 20.0f);
+            if (Lines == 400)
+                Write("(the following frames are only counted)");
+        }
+        if (left - WindowStart >= 10000.0)
+            Summary(left, limit);
+    }
+}
+
 injector::hook_back<bool(__cdecl*)(RsEvent event, void* data)> hbRsEventHandler;
 bool __cdecl RsEventHandler(RsEvent event, void* data)
 {
     if (FrontendMenuManager->m_bMenuActive)
+    {
+        FrameLog::Restart();
         return hbRsEventHandler.fun(event, data);
+    }
 
     static FrameLimiter fpsLimiter;
     static constexpr auto mode = FrameLimiter::FPS_ACCURATE;
@@ -599,9 +720,12 @@ bool __cdecl RsEventHandler(RsEvent event, void* data)
 
         RsGlobal->maxFPS = static_cast<int32_t>(fFpsLimit);
         fpsLimiter.Init(mode, fFpsLimit);
+        FrameLog::Restart();
     }
 
+    const double arrived = FrameLog::Now();
     fpsLimiter.Sync();
+    FrameLog::Frame(arrived, FrameLog::Now(), static_cast<int>(fFpsLimit));
 
     return hbRsEventHandler.fun(event, data);
 }

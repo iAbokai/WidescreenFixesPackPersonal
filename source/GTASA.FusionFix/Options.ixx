@@ -1086,23 +1086,34 @@ export namespace FixOptions
     }
 }
 
-// Diagnostic log for the freeze after applying an MSAA level on Anti Aliasing (FusionFix_MSAA.log in the game's folder):
-// the game applies the level with a Reset of the Direct3D device (RwD3D9ChangeMultiSamplingLevels) and, when that fails,
-// with a second Reset of the old settings, after which a device that stays lost shows a frozen picture. The log has the
-// parameters and the result of every Reset, the state of the device and the window around the change, and the device's
-// state every half second for ten seconds after it. Nothing is written unless a level is applied or the device is reset.
+// Diagnostic log for the freeze after applying an MSAA level on Anti Aliasing (FusionFix_MSAA.log in the game's folder).
+// It is off unless a file named FusionFix_Diagnostics.txt (it may be empty) is in the game's folder, and it only looks: it
+// patches no code and hooks nothing. The version before had a hook on the device's Reset and others inside the game's
+// function that applies the level, exactly where other plugins (Proper Streaming, the windowed mode plugin) have theirs.
+// It writes the state of the device and of its Reset entry when something changes: the level in the game, the cooperative
+// level of the device (lost, waiting for a Reset) and who owns the Reset entry of the device's table.
 namespace MsaaLog
 {
     FILE* Out = nullptr;
     uint32_t* GameLevel = nullptr;      // the MSAA level in use
     uint32_t* GameMaxLevel = nullptr;   // the highest level the device offers
     uint32_t* GameFlags = nullptr;      // bit 0: exclusive (full screen)
-    SafetyHookInline ChangeHook, VideoModeHook, ResetHook;
-    SafetyHookMid CheckSite, ReleasedSite, BuiltSite, Reset1Site, Reset1Result, Reset2Site, Reset2Result;
-    IDirect3DDevice9** GameDevice = nullptr;        // the game's variable with its device
-    D3DPRESENT_PARAMETERS* GameParams = nullptr;    // the parameters it resets the device with
-    void* HookedEntry = nullptr;
-    DWORD WatchUntil = 0, NextWatch = 0;
+    void* ResetEntry = nullptr;
+    void* PresentEntry = nullptr;
+    uint32_t LastLevel = ~0u;
+    HRESULT LastCooperative = D3D_OK;
+    DWORD NextPoll = 0, NextStuck = 0;
+    unsigned StuckLines = 0;
+
+    bool Wanted()
+    {
+        char path[MAX_PATH]{};
+        GetModuleFileNameA(nullptr, path, MAX_PATH);
+        if (auto slash = strrchr(path, '\\'))
+            slash[1] = 0;
+        strcat_s(path, "FusionFix_Diagnostics.txt");
+        return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+    }
 
     void Write(const char* format, ...)
     {
@@ -1121,7 +1132,7 @@ namespace MsaaLog
             }
             if (!Out)
                 return;
-            fprintf(Out, "---- session (FusionFix MSAA log) ----\n");
+            fprintf(Out, "---- session (FusionFix MSAA log, passive) ----\n");
         }
         char text[1536];
         va_list args;
@@ -1177,8 +1188,8 @@ namespace MsaaLog
             Write("%s: no device", when);
             return;
         }
-        const HRESULT coop = device->TestCooperativeLevel();
-        Write("%s: cooperative level %s (0x%08lX) | game: msaa=%lu max=%lu flags=0x%lX", when, Hr(coop), static_cast<unsigned long>(coop),
+        const HRESULT cooperative = device->TestCooperativeLevel();
+        Write("%s: cooperative level %s (0x%08lX) | game: msaa=%lu max=%lu flags=0x%lX", when, Hr(cooperative), static_cast<unsigned long>(cooperative),
             GameLevel ? *GameLevel : 0ul, GameMaxLevel ? *GameMaxLevel : 0ul, GameFlags ? *GameFlags : 0ul);
         IDirect3DSwapChain9* chain = nullptr;
         D3DPRESENT_PARAMETERS pp{};
@@ -1201,15 +1212,6 @@ namespace MsaaLog
         }
     }
 
-    HRESULT __stdcall ResetDetour(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp)
-    {
-        if (pp)
-            WriteParams("Reset with", *pp);
-        const HRESULT hr = ResetHook.unsafe_stdcall<HRESULT>(device, pp);
-        Write("Reset -> %s (0x%08lX)", Hr(hr), static_cast<unsigned long>(hr));
-        return hr;
-    }
-
     std::string ModuleOf(void* address)
     {
         char path[MAX_PATH]{};
@@ -1219,45 +1221,17 @@ namespace MsaaLog
         return path;
     }
 
-    void HookReset()
+    // Where an entry of the device's table points: the module and the first bytes of the code there (a jump means that
+    // something else has patched it)
+    void DescribeEntry(const char* what, void* entry)
     {
-        auto device = Device();
-        if (ResetHook || !device)
-            return;
-        auto table = *reinterpret_cast<void***>(device);
-        HookedEntry = table[16];
-        ResetHook = safetyhook::create_inline(table[16], ResetDetour);
-        Write("hooked IDirect3DDevice9::Reset at %p (%s) in %s", table[16], ResetHook ? "ok" : "FAILED", ModuleOf(table[16]).c_str());
-    }
-
-    // The game's own calls of Reset in the function that changes the level (the first with the new settings, the second
-    // with the old ones when the first failed), whatever the device's table says
-    void LogResetCall(const char* which)
-    {
-        void* device = GameDevice ? *GameDevice : nullptr;
-        void** table = device ? *reinterpret_cast<void***>(device) : nullptr;
-        Write("%s: Reset of the game's device %p (table %p, Reset entry %p) | the fix's device %p, hooked entry %p", which, device, table,
-            table ? table[16] : nullptr, Device(), HookedEntry);
-        if (GameParams)
-            WriteParams("  parameters", *GameParams);
-    }
-
-    bool Is(const uint8_t* function, size_t at, std::initializer_list<uint8_t> bytes)
-    {
-        return std::equal(bytes.begin(), bytes.end(), function + at);
-    }
-
-    // The code of the function as it is in memory now, to compare with the game's file (something else may have changed it)
-    void DumpCode(const uint8_t* function)
-    {
-        Write("the function that changes the level is at %p", function);
-        for (size_t at = 0; at < 0x210; at += 32)
+        char bytes[16 * 3 + 1]{};
+        if (!IsBadReadPtr(entry, 16))
         {
-            char line[32 * 3 + 1]{};
-            for (size_t i = 0; i < 32; ++i)
-                snprintf(line + i * 3, 4, "%02X ", function[at + i]);
-            Write("code +0x%03zX: %s", at, line);
+            for (size_t i = 0; i < 16; ++i)
+                snprintf(bytes + i * 3, 4, "%02X ", static_cast<const uint8_t*>(entry)[i]);
         }
+        Write("%s: %p in %s | %s", what, entry, ModuleOf(entry).c_str(), bytes);
     }
 
     // The modules that are not Windows', to see what else is in the game
@@ -1278,62 +1252,63 @@ namespace MsaaLog
         CloseHandle(snapshot);
     }
 
-    void Trace(SafetyHookMid& hook, const uint8_t* function, size_t at, std::initializer_list<uint8_t> expected, const char* name, void (*destination)(SafetyHookContext&))
+    // Looks at the device a few times a second: nothing is hooked, so it can't be seen inside the game's function itself,
+    // only what is left when it returns
+    void Poll()
     {
-        if (!Is(function, at, expected))
-        {
-            Write("trace '%s' at +0x%zX: the code there is not the game's, not installed", name, at);
-            return;
-        }
-        hook = safetyhook::create_mid(const_cast<uint8_t*>(function) + at, destination);
-        Write("trace '%s' at +0x%zX: %s", name, at, hook ? "installed" : "NOT installed");
-    }
-
-    int __cdecl ChangeDetour(int level)
-    {
-        Write("==== ChangeMultiSamplingLevels(%d)", level);
-        HookReset();
-        Dump("before");
-        const int result = ChangeHook.unsafe_ccall<int>(level);
-        Write("ChangeMultiSamplingLevels returned %d%s", result, result ? "" : " (failed: the device may be left lost)");
-        Dump("after");
-        NextWatch = GetTickCount();
-        WatchUntil = NextWatch + 10000;
-        return result;
-    }
-
-    int __cdecl VideoModeDetour(int mode)
-    {
-        Write("RsSetVideoMode(%d)", mode);
-        const int result = VideoModeHook.unsafe_ccall<int>(mode);
-        Write("RsSetVideoMode returned %d", result);
-        Dump("after video mode");
-        return result;
-    }
-
-    void Watch()
-    {
-        if (!WatchUntil)
-            return;
         const DWORD now = GetTickCount();
-        if (int(now - WatchUntil) > 0)
+        if (int(now - NextPoll) < 0)
+            return;
+        NextPoll = now + 100;
+
+        auto device = Device();
+        if (!device)
+            return;
+        auto table = *reinterpret_cast<void***>(device);
+        if (table[16] != ResetEntry)
         {
-            WatchUntil = 0;
-            Write("watch ended");
-            return;
+            ResetEntry = table[16];
+            DescribeEntry("IDirect3DDevice9::Reset entry", ResetEntry);
         }
-        if (int(now - NextWatch) < 0)
-            return;
-        NextWatch = now + 500;
-        Dump("watch");
+        if (table[17] != PresentEntry)
+        {
+            PresentEntry = table[17];
+            DescribeEntry("IDirect3DDevice9::Present entry", PresentEntry);
+        }
+        const uint32_t level = GameLevel ? *GameLevel : 0;
+        if (level != LastLevel)
+        {
+            Write("MSAA level in the game: %ld -> %lu", LastLevel == ~0u ? -1l : static_cast<long>(LastLevel), static_cast<unsigned long>(level));
+            LastLevel = level;
+            Dump("after the level changed");
+        }
+        const HRESULT cooperative = device->TestCooperativeLevel();
+        if (cooperative != LastCooperative)
+        {
+            LastCooperative = cooperative;
+            StuckLines = 0;
+            NextStuck = now + 1000;
+            Dump("the cooperative level changed");
+            if (cooperative != D3D_OK)
+                DescribeEntry("  Reset entry now", table[16]);
+        }
+        else if (cooperative != D3D_OK && StuckLines < 6 && int(now - NextStuck) >= 0)
+        {
+            ++StuckLines;
+            NextStuck = now + 2000;
+            Dump("the device is still not reset");
+        }
     }
 
     void Install()
     {
+        if (!Wanted())
+            return;
         ListModules();
         auto change = hook::pattern("A1 ? ? ? ? 83 EC 38 85 C0 53 55 56 57 0F 84");
         if (!change.empty())
         {
+            // Only read: the addresses of the game's variables, each checked against the code that is really there
             auto function = change.get_first<uint8_t>();
             auto global = [&](int offset, uint8_t second) -> uint32_t*
             {
@@ -1342,52 +1317,17 @@ namespace MsaaLog
             GameLevel = global(0x14, 0x15);
             GameMaxLevel = global(0x3C, 0x0D);
             GameFlags = global(0x64, 0x35);
-            ChangeHook = safetyhook::create_inline(function, ChangeDetour);
-
-            // Inside the function (offsets of the game's 1.0 code, each checked against the code that is really there)
-            DumpCode(function);
-            if (function[0xBF] == 0xA1)
-                GameDevice = *reinterpret_cast<IDirect3DDevice9***>(function + 0xC0);
-            if (function[0x31] == 0xBE)
-                GameParams = *reinterpret_cast<D3DPRESENT_PARAMETERS**>(function + 0x32);
-            Trace(CheckSite, function, 0x91, { 0x85, 0xC0, 0x7D }, "CheckDeviceMultiSampleType", [](SafetyHookContext& regs)
-            {
-                const HRESULT hr = static_cast<HRESULT>(regs.eax);
-                Write("CheckDeviceMultiSampleType: level %lu, windowed argument %d -> %s (0x%08lX)", GameLevel ? *GameLevel : 0ul,
-                    static_cast<int>(regs.esi), Hr(hr), static_cast<unsigned long>(hr));
-            });
-            Trace(ReleasedSite, function, 0xBF, { 0xA1 }, "after the release", [](SafetyHookContext&)
-            {
-                Write("the game's resources are released, it goes on to build the parameters");
-            });
-            Trace(BuiltSite, function, 0xE1, { 0xA1 }, "parameters built", [](SafetyHookContext&)
-            {
-                if (GameParams)
-                    WriteParams("parameters built by the game", *GameParams);
-            });
-            Trace(Reset1Site, function, 0xF1, { 0xFF, 0x51, 0x40, 0x85, 0xC0, 0x0F, 0x8C }, "Reset 1", [](SafetyHookContext&) { LogResetCall("Reset 1 (the new level)"); });
-            Trace(Reset1Result, function, 0xF6, { 0x0F, 0x8C }, "Reset 1 result", [](SafetyHookContext& regs)
-            {
-                Write("Reset 1 -> %s (0x%08lX)", Hr(static_cast<HRESULT>(regs.eax)), static_cast<unsigned long>(regs.eax));
-            });
-            Trace(Reset2Site, function, 0x1FE, { 0xFF, 0x52, 0x40, 0x85, 0xC0, 0x7D }, "Reset 2", [](SafetyHookContext&) { LogResetCall("Reset 2 (the old settings, after Reset 1 failed)"); });
-            Trace(Reset2Result, function, 0x203, { 0x7D }, "Reset 2 result", [](SafetyHookContext& regs)
-            {
-                Write("Reset 2 -> %s (0x%08lX)", Hr(static_cast<HRESULT>(regs.eax)), static_cast<unsigned long>(regs.eax));
-            });
         }
-        auto videoMode = hook::pattern("8B 44 24 04 50 E8 ? ? ? ? 83 C4 04 E8 ? ? ? ? A1 ? ? ? ? 8B 48 60");
-        if (!videoMode.empty())
-            VideoModeHook = safetyhook::create_inline(videoMode.get_first<uint8_t>(), VideoModeDetour);
         WFP::onBeforeReset() += []()
         {
             // The game repeats it every frame while the device is lost
             static unsigned count = 0;
             if (++count <= 5 || count % 1000 == 0)
                 Write("the fix releases its Direct3D resources for a Reset (#%u)", count);
+            Poll();
         };
-        WFP::onGameProcessEvent() += Watch;
-        HookReset();
+        WFP::onGameProcessEvent() += Poll;
+        Dump("start");
     }
 }
 

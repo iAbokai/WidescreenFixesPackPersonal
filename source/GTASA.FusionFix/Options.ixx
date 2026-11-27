@@ -6,11 +6,13 @@ module;
 #include "Shared/RWGTA/FixMenu.hpp"
 #include "Shared/RWGTA/RootPages.hpp"
 #include <d3d9.h>
+#include <tlhelp32.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <initializer_list>
 #include <string>
 #include <vector>
@@ -1258,6 +1260,24 @@ namespace MsaaLog
         }
     }
 
+    // The modules that are not Windows', to see what else is in the game
+    void ListModules()
+    {
+        wchar_t windows[MAX_PATH]{};
+        GetWindowsDirectoryW(windows, MAX_PATH);
+        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, 0);
+        if (snapshot == INVALID_HANDLE_VALUE)
+            return;
+        MODULEENTRY32W entry{};
+        entry.dwSize = sizeof(entry);
+        for (bool more = Module32FirstW(snapshot, &entry); more; more = Module32NextW(snapshot, &entry))
+        {
+            if (_wcsnicmp(entry.szExePath, windows, wcslen(windows)) != 0)
+                Write("module %p %ls", entry.modBaseAddr, entry.szExePath);
+        }
+        CloseHandle(snapshot);
+    }
+
     void Trace(SafetyHookMid& hook, const uint8_t* function, size_t at, std::initializer_list<uint8_t> expected, const char* name, void (*destination)(SafetyHookContext&))
     {
         if (!Is(function, at, expected))
@@ -1310,6 +1330,7 @@ namespace MsaaLog
 
     void Install()
     {
+        ListModules();
         auto change = hook::pattern("A1 ? ? ? ? 83 EC 38 85 C0 53 55 56 57 0F 84");
         if (!change.empty())
         {

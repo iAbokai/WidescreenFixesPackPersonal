@@ -4,6 +4,7 @@ module;
 #include "common.h"
 #include "FixSettings.hpp"
 #include <mmsystem.h>
+#include <d3d9.h>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -615,7 +616,7 @@ namespace FrameLog
     double Frequency = 0.0;
     double PreviousLeft = 0.0, WindowStart = 0.0, Average = 0.0;
     double Longest = 0.0, Shortest = 0.0, WorkTotal = 0.0, WorkLongest = 0.0;
-    uint32_t Frames = 0, Slow = 0, Fast = 0, Lines = 0;
+    uint32_t Frames = 0, Slow = 0, Fast = 0, Lines = 0, AtEnd = 0;
 
     double Now()
     {
@@ -667,17 +668,18 @@ namespace FrameLog
     void Summary(double now, int limit)
     {
         if (Frames)
-            Write("10 s: %u frames, average %.2f ms (%.1f fps), shortest %.1f, longest %.1f | work average %.1f, longest %.1f | %u late, %u early (limit %d fps)",
-                Frames, (now - WindowStart) / Frames, Frames * 1000.0 / (now - WindowStart), Shortest, Longest, WorkTotal / Frames, WorkLongest, Slow, Fast, limit);
-        Frames = Slow = Fast = 0;
+            Write("10 s: %u frames, average %.2f ms (%.1f fps), shortest %.1f, longest %.1f | work average %.1f, longest %.1f | %u late, %u early, %u limited at the end of the frame (limit %d fps)",
+                Frames, (now - WindowStart) / Frames, Frames * 1000.0 / (now - WindowStart), Shortest, Longest, WorkTotal / Frames, WorkLongest, Slow, Fast, AtEnd, limit);
+        Frames = Slow = Fast = AtEnd = 0;
         Longest = WorkTotal = WorkLongest = 0.0;
         Shortest = 1.0e9;
         WindowStart = now;
     }
 
     // arrived: the frame reached the limiter, left: the limiter let it go
-    void Frame(double arrived, double left, int limit)
+    void Frame(double arrived, double left, int limit, bool atEnd)
     {
+        AtEnd += atEnd;
         const double previous = PreviousLeft;
         PreviousLeft = left;
         if (previous <= 0.0)
@@ -721,6 +723,47 @@ namespace FrameLog
 }
 
 injector::hook_back<bool(__cdecl*)(RsEvent event, void* data)> hbRsEventHandler;
+// The gameplay limiter waits just before the frame is presented, as the limiters of external tools do, and not before
+// the frame starts (the game's own limiter and this one before): the time a frame's work takes varies, and with the wait
+// first the frames reached the screen unevenly even though the game's time steps were exact, which showed as a stutter
+// in animations that are smooth (the dancing minigames at 30 FPS)
+static FrameLimiter fpsLimiter;
+static float fGameLimit = -1.0f;
+static bool bGameFrame = false;         // inside the game's frame (the idle event)
+static bool bFrameLimited = false;      // the frame has waited already
+static SafetyHookInline PresentHook;
+
+static void LimitGameFrame(bool atEnd)
+{
+    if (bFrameLimited)
+        return;
+    bFrameLimited = true;
+    const double arrived = FrameLog::Now();
+    fpsLimiter.Sync();
+    FrameLog::Frame(arrived, FrameLog::Now(), static_cast<int>(fGameLimit), atEnd);
+}
+
+static HRESULT __stdcall PresentWithLimit(IDirect3DDevice9* device, const RECT* source, const RECT* dest, HWND window, const RGNDATA* dirty)
+{
+    if (bGameFrame)
+        LimitGameFrame(false);
+    return PresentHook.unsafe_stdcall<HRESULT>(device, source, dest, window, dirty);
+}
+
+static void HookPresent()
+{
+    try
+    {
+        if (!pD3D9Device.is_initialized() || !pD3D9Device.get())
+            return;
+        auto table = *reinterpret_cast<void***>(pD3D9Device.get());
+        PresentHook = safetyhook::create_inline(table[17], PresentWithLimit);
+    }
+    catch (...)
+    {
+    }
+}
+
 bool __cdecl RsEventHandler(RsEvent event, void* data)
 {
     if (FrontendMenuManager->m_bMenuActive)
@@ -729,16 +772,14 @@ bool __cdecl RsEventHandler(RsEvent event, void* data)
         return hbRsEventHandler.fun(event, data);
     }
 
-    static FrameLimiter fpsLimiter;
     static constexpr auto mode = FrameLimiter::FPS_ACCURATE;
     static bool bTimerResolutionSet = false;
-    static float fLastFpsLimit = -1.0f;
 
     float fFpsLimit = GetFrameLimiterValue();
 
-    if (fFpsLimit != fLastFpsLimit)
+    if (fFpsLimit != fGameLimit)
     {
-        fLastFpsLimit = fFpsLimit;
+        fGameLimit = fFpsLimit;
 
         if (!bTimerResolutionSet)
         {
@@ -751,11 +792,13 @@ bool __cdecl RsEventHandler(RsEvent event, void* data)
         FrameLog::Restart();
     }
 
-    const double arrived = FrameLog::Now();
-    fpsLimiter.Sync();
-    FrameLog::Frame(arrived, FrameLog::Now(), static_cast<int>(fFpsLimit));
-
-    return hbRsEventHandler.fun(event, data);
+    bGameFrame = true;
+    bFrameLimited = false;
+    const bool result = hbRsEventHandler.fun(event, data);
+    // Without a Present in the frame (or without the hook on it) the wait comes at the end of the frame
+    LimitGameFrame(true);
+    bGameFrame = false;
+    return result;
 }
 
 static SafetyHookInline DrawMenuHook;
@@ -787,6 +830,7 @@ public:
         WFP::onGameInitEvent() += []()
         {
             // The game has read gta_sa.set: the .cfg's values replace its two
+            HookPresent();
             NativeRows::ApplyBorders();
             NativeRows::ApplyLimiter();
             OnSettingChange("MAIN.CutsceneBorders", NativeRows::ApplyBorders);

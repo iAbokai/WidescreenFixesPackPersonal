@@ -1208,6 +1208,15 @@ namespace MsaaLog
         return hr;
     }
 
+    std::string ModuleOf(void* address)
+    {
+        char path[MAX_PATH]{};
+        HMODULE module = nullptr;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(address), &module))
+            GetModuleFileNameA(module, path, MAX_PATH);
+        return path;
+    }
+
     void HookReset()
     {
         auto device = Device();
@@ -1258,15 +1267,6 @@ namespace MsaaLog
         }
         hook = safetyhook::create_mid(const_cast<uint8_t*>(function) + at, destination);
         Write("trace '%s' at +0x%zX: %s", name, at, hook ? "installed" : "NOT installed");
-    }
-
-    std::string ModuleOf(void* address)
-    {
-        char path[MAX_PATH]{};
-        HMODULE module = nullptr;
-        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(address), &module))
-            GetModuleFileNameA(module, path, MAX_PATH);
-        return path;
     }
 
     int __cdecl ChangeDetour(int level)

@@ -912,6 +912,20 @@ class PresentPacer
         }
     }
 
+    // Experiment 4 (Timer.ixx): the time a frame is let go moves by up to 3.5 ms either way, the schedule it follows doesn't,
+    // so the frames still come as often and each stays in its refresh interval. The game's time steps then differ from
+    // frame to frame, as with the limiters of drivers
+    static double Jitter()
+    {
+        if (!(Experiment::Value() & 4))
+            return 0.0;
+        static uint32_t state = 0x9E3779B9u;
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        return (state / 4294967296.0 * 2.0 - 1.0) * 3.5;
+    }
+
 public:
     double Place = -1.0;    // where in the display's refresh the last frame was let go (0 to 1), below 0 when not known
     bool Locked = false;    // the last frame followed the display's refreshes
@@ -975,7 +989,7 @@ public:
             }
             if (slot <= 0.0 || now - target > 0.3 * refresh)
                 target = start + (std::ceil((now - LateTolerance - start) / refresh - 0.5) + 0.5) * refresh;    // the first middle that is not past
-            now = WaitUntil(target);
+            now = WaitUntil(target + Jitter());
             slot = target;
             Locked = true;
         }
@@ -983,7 +997,7 @@ public:
         {
             if (next <= 0.0 || now - next > LateTolerance)
                 next = now;
-            now = WaitUntil(next);
+            now = WaitUntil(next + Jitter());
             next += period;
         }
         if (known)

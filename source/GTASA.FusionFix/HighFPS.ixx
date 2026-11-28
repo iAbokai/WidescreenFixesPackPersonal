@@ -54,6 +54,86 @@ namespace
         return (whole + 0.5f) / 20.0f;
     }
 
+    // The game's clock adds the whole milliseconds of each frame (the time step rounded down), so it runs slow by the
+    // fractions: 1 % at 30 fps (33.33 ms a frame count as 33), 4 % at 60. Experiment 2 adds the fractions back
+    uint32_t LastClock = 0;                         // the clock at the end of the last frame
+    bool LastClockKnown = false;
+    double ClockCarry = 0.0;                        // milliseconds the clock has lost, not yet given back
+
+    void KeepClock(float stepNonClipped, bool give)
+    {
+        uint32_t& clock = CTimer::m_snTimeInMilliseconds.get();
+        const uint32_t added = clock - LastClock;   // what the game added this frame
+        if (give && LastClockKnown && added <= 300)
+        {
+            ClockCarry += std::min<double>(stepNonClipped * 20.0, 300.0) - added;
+            if (ClockCarry > 2.0 || ClockCarry < -2.0)
+                ClockCarry = 0.0;
+            if (ClockCarry >= 1.0)
+            {
+                const double whole = std::floor(ClockCarry);
+                clock += static_cast<uint32_t>(whole);
+                ClockCarry -= whole;
+            }
+        }
+        else
+            ClockCarry = 0.0;
+        LastClock = clock;
+        LastClockKnown = true;
+    }
+
+    // The timing log (FusionFix_Timing.log, only with the experiment file): every 10 seconds, how far the game's clock and
+    // the millisecond timers have come against the real time
+    struct TimingStats
+    {
+        bool running = false;
+        double startReal = 0.0;
+        uint32_t startClock = 0;
+        uint32_t frames = 0;
+        double steps = 0.0;                         // the time steps summed
+        int64_t timers = 0;                         // what a script's timer (step * 0.02 * 1000 each frame) adds
+        int lastExperiment = -1;
+    } Stats;
+
+    void LogTiming()
+    {
+        if (!Experiment::Exists())
+        {
+            Stats.running = false;
+            Stats.lastExperiment = -1;
+            return;
+        }
+        LARGE_INTEGER counter, frequency;
+        QueryPerformanceCounter(&counter);
+        QueryPerformanceFrequency(&frequency);
+        const double now = counter.QuadPart * 1000.0 / frequency.QuadPart;
+        const uint32_t clock = CTimer::m_snTimeInMilliseconds.get();
+        const int experiment = Experiment::Value();
+        if (experiment != Stats.lastExperiment)
+        {
+            Experiment::Log("[%10.0f] experiment %d (1: timers keep the fractions of milliseconds, 2: the clock does, 4: limiter jitter)", now, experiment);
+            Stats.lastExperiment = experiment;
+            Stats.running = false;
+        }
+        if (!Stats.running)
+        {
+            Stats = TimingStats{ true, now, clock, 0, 0.0, 0, experiment };
+            return;
+        }
+        ++Stats.frames;
+        Stats.steps += std::min<double>(*TimeStepNonClipped * 20.0, 300.0);
+        Stats.timers += static_cast<int>(WholeMsStep * 0.02f * 1000.0f);
+        const double real = now - Stats.startReal;
+        if (real >= 10000.0)
+        {
+            const double clockAdvance = static_cast<double>(clock - Stats.startClock);
+            Experiment::Log("[%10.0f] %.1f s, %u frames: game clock +%.0f ms (%.2f %% of the real time) | time steps summed %.0f ms (%.2f %%) | millisecond timers +%lld ms (%.2f %%) | average step %.3f (%.1f fps), %s",
+                now, real / 1000.0, Stats.frames, clockAdvance, clockAdvance * 100.0 / real, Stats.steps, Stats.steps * 100.0 / real,
+                static_cast<long long>(Stats.timers), Stats.timers * 100.0 / real, AverageStep, 50.0 / AverageStep, HighRate ? "high frame rate on" : "high frame rate off");
+            Stats.running = false;
+        }
+    }
+
     void UpdateSteps()
     {
         if (!FrameCounter.is_initialized() || !TimeStepNonClipped.is_initialized())
@@ -61,6 +141,9 @@ namespace
         float step = CTimer::ms_fTimeStep;
         float stepNonClipped = *TimeStepNonClipped;
         GameMs += step * 20.0;
+
+        const int experiment = Experiment::Value();
+        KeepClock(stepNonClipped, (experiment & 2) != 0);
 
         // Decide on the average, so that the frame times' jitter at a 30 fps limit doesn't switch every frame
         if (step > 0.011f)
@@ -77,8 +160,16 @@ namespace
 
         if (!HighRate)
         {
-            WholeMsStep = step;
-            WholeMsStepNonClipped = stepNonClipped;
+            if (experiment & 1)
+            {
+                WholeMsStep = WholeMs(step, MsCarry);
+                WholeMsStepNonClipped = WholeMs(stepNonClipped, MsCarryNonClipped);
+            }
+            else
+            {
+                WholeMsStep = step;
+                WholeMsStepNonClipped = stepNonClipped;
+            }
             Frames30 = Frames30Gated = *FrameCounter;
             Frames30Passed = 1;
             TurnDamping = TurnDampingBase;
@@ -103,6 +194,7 @@ namespace
     {
         shTimerUpdate.unsafe_ccall();
         UpdateSteps();
+        LogTiming();
     }
 
     // The code section of the game
